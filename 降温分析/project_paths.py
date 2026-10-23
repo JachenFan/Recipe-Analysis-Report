@@ -16,7 +16,9 @@
     ├── 降温分析/                        代码 + 抽取缓存（_runN_all.csv / _cache/）
     └── README.md / 项目文件分类.md / 分析需求.md
 
-ROOT 可用环境变量 `CVD_ROOT` 覆盖（换机器 / 换盘不改代码）。
+ROOT 的确定顺序：环境变量 `CVD_ROOT` > **本文件上级目录**（clone 到哪就用到哪，无需配置）。
+输出目录不存在时会自动创建（`build_report` 里 `os.makedirs(exist_ok=True)`）；要另存别处用
+`make_report.py --out <目录>` 或 `make_html_report.py --out <目录>`。
 
 兼容性
 ------
@@ -27,7 +29,12 @@ from __future__ import annotations
 
 import os
 
-ROOT = os.environ.get("CVD_ROOT") or r"D:\个人文件\报告\工艺分析"
+# ROOT 的确定顺序：① 环境变量 CVD_ROOT（换机器/换盘/临时输出） ② **本文件所在目录的上级**
+# 绝不能写死绝对路径：本项目会 clone 到别的机器，写死会让产物落到本机 D 盘（或直接报错）。
+# 目录结构固定为 <ROOT>/降温分析/project_paths.py，所以上级目录就是项目根。
+_HERE = os.path.dirname(os.path.abspath(__file__))          # …/降温分析
+_DEFAULT_ROOT = os.path.dirname(_HERE)                       # 项目根（含 输入/ 输出/）
+ROOT = os.path.abspath(os.environ.get("CVD_ROOT") or _DEFAULT_ROOT)
 
 # ---- 输入 ----
 IN_ROOT = os.path.join(ROOT, "输入")

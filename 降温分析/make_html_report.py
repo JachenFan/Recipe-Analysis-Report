@@ -171,9 +171,23 @@ def _sm(t, keys, *arrs):
 
 
 # ------------------------------------------------------------------ 取数
+_LEGACY_HINT = (
+    "\n  这是「老批次」模式，复用需求3/4/6 的历史产物；新克隆的仓库里没有这些文件。\n"
+    "  单批次请改用现算路径（不依赖任何历史产物）：\n"
+    "    python make_report.py --recipe <recipe.xlsx> --log <log.xlsx>\n"
+    "  或先跑一遍 需求3→4→6 生成历史产物（会重写跨批次 xlsx，仅维护者使用）。")
+
+
+def _need(path: str) -> str:
+    """老批次模式的可选文件：缺失时给可操作的提示，而不是裸 FileNotFoundError。"""
+    if not os.path.exists(path):
+        raise SystemExit(f"[找不到] {path}" + _LEGACY_HINT)
+    return path
+
+
 def load_step_table() -> pd.DataFrame:
     """步号必须保留字符串形态：重复 pass 的步写作 '13(2)'，转成数字会被丢掉。"""
-    p = pp.out("需求6_分步高清图与汇报PPT", "_step_table.csv")
+    p = _need(pp.out("需求6_分步高清图与汇报PPT", "_step_table.csv"))
     d = pd.read_csv(p, dtype={"步号": str})
     d["_n"] = d["步号"].str.split("(").str[0].astype(int)
     d["_p"] = d["步号"].str.extract(r"\((\d+)\)").fillna(1).astype(int)
@@ -196,9 +210,9 @@ def load_proc(tag: str) -> pd.DataFrame:
 
 
 def load_fit_sheets():
-    t3 = pd.read_excel(pp.out("需求3_工艺全程分析", "需求3_工艺全程分析.xlsx"),
+    t3 = pd.read_excel(_need(pp.out("需求3_工艺全程分析", "需求3_工艺全程分析.xlsx")),
                        sheet_name="分段速率明细")
-    t4 = pd.read_excel(pp.out("需求4_真空度蝶阀分析", "需求4_真空度蝶阀分析.xlsx"),
+    t4 = pd.read_excel(_need(pp.out("需求4_真空度蝶阀分析", "需求4_真空度蝶阀分析.xlsx")),
                        sheet_name="分段速率明细")
     # ⚠️ 步号一律保持**字符串**比对：需求4 明细里重复 pass 写作 '13(2)'，且两表 dtype 不同。
     # 曾用 pd.to_numeric 统一 → '13(2)' 被转成 NaN 丢掉、整数又被写成 '13.0' 对不上，

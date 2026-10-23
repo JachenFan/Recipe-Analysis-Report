@@ -330,9 +330,13 @@ def generate(recipe_path, log_path, name=None, note="", outdir=None,
         print(f"[2/4] log：{log_path}")
     proc, linfo = ingest_log(log_path, cache=cache, verbose=verbose)
 
+    guessed = not name
     tag = name or _guess_name(recipe_path, log_path, rinfo)
     if verbose:
         print(f"[3/4] 单步统计：炉次 {tag}" + (f"（{note}）" if note else ""))
+        if guessed and tag == "未命名批次":
+            print("  ! 文件名与 recipe 的 sheet 名都没能识别出炉次号，报告标记为「未命名批次」；"
+                  "建议用 --name 29C26xxxx 指定")
     st, segT, segV = analyze_batch(proc, recipe, tag, label=note, verbose=verbose)
 
     if verbose:
@@ -347,16 +351,39 @@ def generate(recipe_path, log_path, name=None, note="", outdir=None,
     return out
 
 
-def _guess_name(recipe_path, log_path, rinfo) -> str:
-    """批次名：优先从文件名里取 29C2610xx 这类炉次号，其次用 recipe 文件名去掉后缀。"""
+def _guess_name(recipe_path, log_path, rinfo=None) -> str:
+    """批次名：文件名里的炉次号 > recipe 的 sheet 名 > 文件名主干（须含数字） > 占位。
+
+    ⚠️ 不能只靠文件名：现场文件常被随手改名（"配方 最终版.xlsx"），
+    早先直接把主干当炉次号，结果报告标题、文件名、结论里全印着"配方 最终版"（新设备实测踩到）。
+    recipe 的 **sheet 名通常就是炉次号**（29C261016.xlsx → sheet 29C260815），是更可靠的来源。
+    """
     import re
     pat = re.compile(r"(\d{2}C\d{6})")
     for p in (recipe_path, log_path):
         m = pat.search(os.path.basename(str(p)))
         if m:
             return m.group(1)
+
+    # 次选：recipe 的 sheet 名。调用方没给 info 时，自己轻量读一次（只读，几百 KB）
+    sheets = []
+    if rinfo and rinfo.get("sheet"):
+        sheets = [rinfo["sheet"]]
+    else:
+        try:
+            import pandas as pd
+            sheets = list(pd.ExcelFile(recipe_path).sheet_names)
+        except Exception:
+            sheets = []
+    for s in sheets:
+        m = pat.search(str(s))
+        if m:
+            return m.group(1)
+
     stem = os.path.splitext(os.path.basename(str(recipe_path)))[0]
-    return re.sub(r"[-_ ]*(recipe|配方|实际)$", "", stem) or "批次"
+    stem = re.sub(r"[-_\s]*(recipe|配方|实际|final|最终版?)$", "", stem, flags=re.I).strip()
+    # 主干不含数字时宁可给占位，也不要编一个像模像样的"批次名"
+    return stem if re.search(r"\d", stem) else "未命名批次"
 
 
 if __name__ == "__main__":

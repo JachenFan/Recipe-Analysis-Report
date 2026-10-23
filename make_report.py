@@ -75,6 +75,11 @@ def _ps(script: str, timeout: int = 600) -> str:
 
 
 def pick_file(title: str, start: str = "") -> str:
+    # 起始目录兜底：clone 到新机器时 输入/ 可能还不存在（数据不在仓库里），
+    # 这时退回项目根，别让对话框停在系统默认位置
+    start = start or pp.IN_ROOT
+    if not os.path.isdir(start):
+        start = pp.ROOT if os.path.isdir(pp.ROOT) else ""
     ps = f"""
 Add-Type -AssemblyName System.Windows.Forms
 $d = New-Object System.Windows.Forms.OpenFileDialog
@@ -134,13 +139,13 @@ def main(argv=None) -> int:
     import batch_pipeline as bp
     name = a.name
     if not name:
-        guess = bp._guess_name(recipe, log, {})
         # 只有「双击 / 一个参数都不给」才弹输入框。
-        # 命令行给了路径就静默取默认名——脚本化调用时 stdin 也可能是 tty，
-        # 靠 isatty 判断会把批量任务卡在隐藏的模态框上（实测踩过）。
+        # 命令行给了路径就交给 generate 推断（它能同时用文件名与 recipe 的 sheet 名）；
+        # 这里传空 info 会丢掉 sheet 信息，曾把「配方 最终版」当成炉次号印进报告。
         if a.recipe or a.log or not sys.stdin.isatty():
-            name = guess
+            name = None
         else:
+            guess = bp._guess_name(recipe, log, None)
             name = input_box("炉次号（报告标题用，可改）：", guess)
 
     try:
