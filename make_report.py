@@ -36,20 +36,42 @@ except Exception:
 
 
 # ------------------------------------------------------------------ 交互
+def _decode(b: bytes) -> str:
+    """把子进程输出字节解成文本。
+
+    ⚠️ 不要用 `subprocess.run(..., text=True)`：本机是中文 Windows，PowerShell 走管道时
+    按 OEM 代码页（GBK）输出，而 .bat 用 `-X utf8` 让 Python 进了 UTF-8 模式 →
+    text 模式按 UTF-8 解码，碰到中文路径（如 `D:\\个…` 的第 4 字节 0xb8）直接抛
+    UnicodeDecodeError。该异常发生在 subprocess **读线程**里，不会传回主流程，
+    表现出来只是"选完文件就取消"。这里统一取 bytes 再按 utf-8 → gbk → mbcs 依次试。
+    """
+    if not b:
+        return ""
+    for enc in ("utf-8", "gbk", "mbcs"):
+        try:
+            return b.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return b.decode("utf-8", errors="replace")
+
+
 def _ps(script: str, timeout: int = 600) -> str:
     """跑一段 PowerShell 取标准输出（仅用于系统对话框，不做任何文件操作）。"""
+    # 让 PowerShell 自己按 UTF-8 输出（双保险：PS 5.1 只认控制台编码时由 _decode 兜底）
+    script = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8\n" + script
     try:
         r = subprocess.run(["powershell", "-NoProfile", "-STA", "-Command", script],
-                           capture_output=True, text=True, timeout=timeout)
+                           capture_output=True, timeout=timeout)      # 关键：不开 text=True
     except subprocess.TimeoutExpired:
         print("  ! 系统对话框超时（未操作），改用默认值继续")
         return ""
     except Exception as e:
         print(f"  ! 无法调用系统对话框（{e}）")
         return ""
-    if r.returncode != 0 and r.stderr:
-        print("  ! 对话框出错：", r.stderr.strip().splitlines()[0])
-    return (r.stdout or "").strip()
+    err = _decode(r.stderr).strip()
+    if r.returncode != 0 and err:
+        print("  ! 对话框出错：", err.splitlines()[0])
+    return _decode(r.stdout).strip()
 
 
 def pick_file(title: str, start: str = "") -> str:
