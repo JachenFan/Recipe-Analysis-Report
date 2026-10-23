@@ -1,0 +1,11 @@
+# 生成 HTML 报告所需依赖（Python 3.9+）
+# 实测环境：Python 3.13.14 / pandas 3.0.6 / numpy 2.5.3 / matplotlib 3.11.2 / plotly 7.1.0
+pandas>=2.0
+numpy>=1.24
+matplotlib>=3.7
+plotly>=5.18
+openpyxl>=3.1
+
+# 可选加速：log 有 154 列、4 万+ 行，用 Rust 版 calamine 解析比 openpyxl 快约 8 倍。
+# 装上会自动启用，装不上不影响功能（自动回落 openpyxl）。
+# python-calamine>=0.2

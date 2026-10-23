@@ -1,0 +1,32 @@
+# 只跟踪源码与必要文档；数据、产物、缓存一律忽略
+/*
+!/.gitignore
+!/README.md
+!/requirements.txt
+!/make_report.py
+!/make_report.bat
+
+!/降温分析/
+降温分析/*
+!降温分析/project_paths.py
+!降温分析/analyze_v5.py
+!降温分析/analyze_process_v3.py
+!降温分析/analyze_vacuum_v4.py
+!降温分析/analyze_v6.py
+!降温分析/temp_fix.py
+!降温分析/batch_notes.py
+!降温分析/seg_terms.py
+!降温分析/recipe_meta.py
+!降温分析/batch_pipeline.py
+!降温分析/make_html_report.py
+!降温分析/_verify_batch_pipeline.py
+
+# 通用缓存与编辑器产物
+**/__pycache__/
+**/*.pyc
+**/_cache/
+**/.slidep/
+**/.cache/
+Thumbs.db
+desktop.ini
+~$*
