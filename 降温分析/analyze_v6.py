@@ -68,7 +68,7 @@ C = dict(
     OK="#2f9e44", BAD="#e03131", PART="#f08c00", NA="#adb5bd",
     GRID="#dee2e6",
 )
-PHASE_BG = {"升温": "#fff4e6", "恒温": "#e7f5ff", "降温": "#ebfbee"}
+PHASE_BG = {v5.phases.PRE: "#fff4e6", v5.phases.HOLD: "#e7f5ff", v5.phases.POST: "#ebfbee"}
 
 # 功率单位（需求6-1）
 P_UNIT = "kW"
@@ -498,10 +498,13 @@ def plot_overview_dual(tag, label, recipe, proc, kind, fname, title):
                 ax.axvline(a, color=C["GRID"], lw=0.5)
             first = False
         ax.axvspan(a, b, color=PHASE_BG[v5.phase_of(s)], alpha=0.4, zorder=0)
-    for ph, s0, s1, c in [("升温", 1, 24, "#e8590c"), ("恒温", 25, 25, "#1971c2"), ("降温", 26, 45, "#2f9e44")]:
-        xx = [a for (s, p), (a, b) in spans.items() if s == s0]
-        if xx:
-            ax.text(xx[0] + 1, ax.get_ylim()[1], f" {ph}段(步{s0}–{s1})", fontsize=9, color=c,
+    # 阶段文字标注：锚点与步号区间都按本批实际步次生成（不写死 1–24 / 25 / 26–45）
+    for ph, c in ((v5.phases.PRE, "#e8590c"), (v5.phases.HOLD, "#1971c2"), (v5.phases.POST, "#2f9e44")):
+        ks = sorted(k for k in spans if v5.phase_of(k[0]) == ph)
+        if ks:
+            xx = spans[ks[0]][0]
+            rng = (f"步{ks[0][0]}" if ks[0][0] == ks[-1][0] else f"步{ks[0][0]}–{ks[-1][0]}")
+            ax.text(xx + 1, ax.get_ylim()[1], f" {ph}({rng})", fontsize=9, color=c,
                     va="top", ha="left")
     ax.set_xlabel("累计时间 (min，自首步起)")
     ax.set_title(title, fontsize=14)
@@ -814,7 +817,9 @@ def main():
     diags = {}             # tag -> 需求7 源系统偏差诊断
     for tag, label, rfile, d3, d4 in RUNS:
         recipe = v5.load_recipe(rfile)
-        proc, dropped = v5.load_log(tag)
+        hold = v5.phases.hold_step(recipe)       # 涂层中 = 本批 recipe 时长最长的一步
+        v5.phases.set_active(hold, tag)
+        proc, dropped = v5.load_log(tag, hold=hold)
         meas = v5.load_measured(tag, d3, d4)
         st = v5.analyze_run(tag, label, recipe, proc, meas)
         all_stats.append(st)
@@ -834,9 +839,9 @@ def main():
         lut = {str(r["步号"]): r for _, r in st.iterrows()}
 
         keys = sorted(proc.groupby(["step", "pass"], sort=False).groups.keys(), key=lambda k: (k[0], k[1]))
-        heat = [k for k in keys if 1 <= k[0] <= 24]
-        cool = [k for k in keys if k[0] >= 26]
-        holdk = [k for k in keys if k[0] == 25]
+        heat = [k for k in keys if k[0] < hold]
+        cool = [k for k in keys if k[0] > hold]
+        holdk = [k for k in keys if k[0] == hold]
 
         def _span(ks):
             """按实际存在的步生成标题区间（不写死，避免 recipe 更正后标题与实际步号脱节）。"""
@@ -852,22 +857,22 @@ def main():
                            f"工艺全程 温度(左轴,℃) vs 功率(右轴,kW) 双纵坐标  {label}")
         plot_overview_dual(tag, label, recipe, proc, "vm", f"{tag}_真空蝶阀_全程双轴_v6.png",
                            f"工艺全程 炉内真空(左轴,Pa 对数) vs 蝶阀开度(右轴,%) 双纵坐标  {label}")
-        plot_step_grid_dual(tag, label, recipe, proc, heat, "tp", f"{tag}_温度功率_升温段分步_v6.png",
-                            f"升温段({sp_h}) 温度 vs 功率(kW) 分步双轴 + 速率拟合  {label}",
+        plot_step_grid_dual(tag, label, recipe, proc, heat, "tp", f"{tag}_温度功率_涂层前分步_v6.png",
+                            f"涂层前({sp_h}) 温度 vs 功率(kW) 分步双轴 + 速率拟合  {label}",
                             st=st, fit=fitseg)
-        plot_step_grid_dual(tag, label, recipe, proc, cool, "tp", f"{tag}_温度功率_降温段分步_v6.png",
-                            f"降温段({sp_c}) 温度 vs 功率(kW) 分步双轴 + 速率拟合  {label}",
+        plot_step_grid_dual(tag, label, recipe, proc, cool, "tp", f"{tag}_温度功率_涂层后分步_v6.png",
+                            f"涂层后({sp_c}) 温度 vs 功率(kW) 分步双轴 + 速率拟合  {label}",
                             st=st, fit=fitseg)
-        plot_step_grid_dual(tag, label, recipe, proc, heat, "vm", f"{tag}_真空蝶阀_升温段分步_v6.png",
-                            f"升温段({sp_h}) 真空度 vs 蝶阀开度 分步双轴 + 速率拟合  {label}",
+        plot_step_grid_dual(tag, label, recipe, proc, heat, "vm", f"{tag}_真空蝶阀_涂层前分步_v6.png",
+                            f"涂层前({sp_h}) 真空度 vs 蝶阀开度 分步双轴 + 速率拟合  {label}",
                             st=st, fit=fitseg)
-        plot_step_grid_dual(tag, label, recipe, proc, cool, "vm", f"{tag}_真空蝶阀_降温段分步_v6.png",
-                            f"降温段({sp_c}) 真空度 vs 蝶阀开度 分步双轴 + 速率拟合  {label}",
+        plot_step_grid_dual(tag, label, recipe, proc, cool, "vm", f"{tag}_真空蝶阀_涂层后分步_v6.png",
+                            f"涂层后({sp_c}) 真空度 vs 蝶阀开度 分步双轴 + 速率拟合  {label}",
                             st=st, fit=fitseg)
         if holdk:
             sp_o = _span(holdk)
-            plot_hold_dual(tag, label, recipe, proc, holdk[0], f"{tag}_恒温段步25_双轴_v6.png",
-                           f"恒温段({sp_o})  {label}")
+            plot_hold_dual(tag, label, recipe, proc, holdk[0], f"{tag}_涂层中步{hold}_双轴_v6.png",
+                           f"涂层中({sp_o})  {label}")
         plot_rate_summary(tag, label, st, f"{tag}_升降温速率拟合总览.png",
                           f"各步升降温速率拟合（{label}）按曲线类型选用方法　正=升温 / 负=降温")
 

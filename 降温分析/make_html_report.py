@@ -8,7 +8,7 @@
    —— 本脚本**不重新拟合**，避免出现第二套口径。
 2. **自包含**：plotly.min.js 直接内联，双击即可离线打开，不依赖 CDN/网络。
 3. **保极值抽稀**：单步最多保留 N 点，按「分桶取 左轴+右轴 各自的 min/max」抽稀，
-   既压缩体积又不丢尖峰（步25 有 6.9 万点）。
+   既压缩体积又不丢尖峰（唯一的涂层中步常达 6~7 万点）。
 4. **实时切换**：一次算好全部步的数据，切步只做 `Plotly.react`，无请求、无重排。
 5. **总览页（R11-b）**：与需求6 PPT 的三张总览页对齐——全程温度-功率、全程真空-蝶阀、
    各步速率拟合；外加 KPI 卡与由数据生成的「总览要点」。
@@ -73,6 +73,10 @@ BASE = pp.ROOT
 ANA = pp.code()
 OUTDIR = pp.out("需求10_交互式HTML报告")
 
+if ANA not in sys.path:
+    sys.path.insert(0, ANA)
+import phases                                    # noqa: E402  阶段划分（单一事实来源）
+
 RUNS = {                    # tag -> (短名称, 工况备注——只写工艺相关，不写实现说明)
     "run1": ("29C260916", "不同转速"),
     "run2": ("29C260926", "中阻"),
@@ -92,7 +96,7 @@ COL = dict(
     FIT="#d6336c", T1="#15aabf", T2="#9c36b5",
     GRID="#dee2e6", INK="#1f2937", SUB="#6b7280", BG="#f3f4f6",
 )
-PHASE_COL = {"升温": "#f76707", "恒温": "#1864ab", "降温": "#2f9e44"}
+PHASE_COL = {phases.PRE: "#f76707", phases.HOLD: "#1864ab", phases.POST: "#2f9e44"}
 
 # 判型配色（与 analyze_v6.plot_rate_summary 的 colmap 一致，单一来源）
 TYPE_COL = {
@@ -198,7 +202,7 @@ def load_proc(tag: str) -> pd.DataFrame:
     """⚠️ 必须复用 analyze_v5.load_log，不要自己 groupby 步号。
 
     该函数做了两件本页面不能省略的事：
-      1) 只保留「含恒温步25 的主工艺段」及其之前的段落（seg <= main），
+      1) 只保留「含『涂层中』步（recipe 时长最长的一步）的主工艺段」及其之前的段落（seg <= main），
          否则步0 会把 run 结束后几天的待机日志也算进来（实测 31265 行 vs 应有 12431 行）；
       2) 标 `pass` 轮次，把重复执行的步拆成 '0' / '0(2)'、'13' / '13(2)'。
     顺带复用需求7+方案C 的温度口径修正（幂等）。
@@ -494,7 +498,7 @@ def build_step(proc: pd.DataFrame, st: pd.Series, t3, t4, tag: str) -> dict:
         id=lab,
         n=n,
         p=p,
-        phase=str(st.get("阶段") or ""),
+        phase=phases.phase_of(n),        # 阶段现算：CSV 里的旧口径（步25=恒温）不再可信
         tm=tm,
         tmode=str(st.get("温度模式含义") or ""),
         pm=int(st["压力模式"]) if pd.notna(st.get("压力模式")) else 0,
@@ -537,9 +541,14 @@ def build_step(proc: pd.DataFrame, st: pd.Series, t3, t4, tag: str) -> dict:
 
 
 # ------------------------------------------------------------------ 总览（对齐 PPT 三张总览页）
-def build_overview(proc: pd.DataFrame, steps: list[dict]) -> dict:
-    """全程三视图 + KPI + 要点。x 轴统一为「自工艺开始的累计小时」。"""
-    import analyze_v5 as v5
+def build_overview(proc: pd.DataFrame, steps: list[dict], plab: dict | None = None) -> dict:
+    """全程三视图 + KPI + 要点。x 轴统一为「自工艺开始的累计小时」。
+
+    `plab` = 阶段全名（含方向后缀，如「涂层前·升温」），由 `phases.labels_from_steps` 生成；
+    缺省时退化为阶段基名。
+    """
+    plab = plab or {}
+    L = lambda b: plab.get(b, b)
 
     t0 = proc["时间"].min()
     tt = (proc["时间"] - t0).dt.total_seconds().to_numpy(float) / 3600.0
@@ -562,7 +571,8 @@ def build_overview(proc: pd.DataFrame, steps: list[dict]) -> dict:
         lab = f"{st}" if ps <= 1 else f"{st}({ps})"
         a = (g["时间"].min() - t0).total_seconds() / 3600.0
         b = (g["时间"].max() - t0).total_seconds() / 3600.0
-        bands.append(dict(t0=round(a, 4), t1=round(b, 4), ph=v5.phase_of(st), lab=lab))
+        _ph = phases.phase_of(st)
+        bands.append(dict(t0=round(a, 4), t1=round(b, 4), ph=_ph, plab=L(_ph), lab=lab))
         row = lut.get(lab)
         if not row:
             continue
@@ -588,8 +598,8 @@ def build_overview(proc: pd.DataFrame, steps: list[dict]) -> dict:
     imax = int(np.nanargmax(T))
     Tmax, t_at_max = float(T[imax]), float(tt[imax])
     by_ph = {p: [s for s in steps if s["phase"] == p] for p in PHASE_COL}
-    hold_h = sum(s["dur"] for s in by_ph["恒温"] if s["dur"]) / 60.0
-    cool = by_ph["降温"]
+    hold_h = sum(s["dur"] for s in by_ph[phases.HOLD] if s["dur"]) / 60.0
+    cool = by_ph[phases.POST]
     cool_h = sum(s["dur"] for s in cool if s["dur"]) / 60.0
     cool_dT = None
     if cool and cool[0].get("T0") is not None and cool[-1].get("T1e") is not None:
@@ -613,7 +623,8 @@ def build_overview(proc: pd.DataFrame, steps: list[dict]) -> dict:
 
     kpi = [
         ["步次", f"{len(steps)}",
-         f"升温 {len(by_ph['升温'])} / 恒温 {len(by_ph['恒温'])} / 降温 {len(by_ph['降温'])}"],
+         f"涂层前 {len(by_ph[phases.PRE])} · 涂层中 {len(by_ph[phases.HOLD])} · "
+         f"涂层后 {len(by_ph[phases.POST])}"],
         ["未达标步次", f"{len(v_bad)} 步" if v_bad else "全部达标",
          # 四档互斥且合计＝总步数；不做"温度 n / 压力 m"拆分——同一步两侧都未达标会重复计数
          (f"达标 {len(v_ok)} · 过渡 {len(v_warn)} · 短步 {n_short} · "
@@ -621,8 +632,8 @@ def build_overview(proc: pd.DataFrame, steps: list[dict]) -> dict:
          "#e03131" if v_bad else "#2f9e44"],
         ["全程时长", f"{dur:.1f} h", f"{dur / 24:.1f} 天"],
         ["最高主控温度", f"{Tmax:.1f} ℃", f"出现在 {t_at_max:.1f} h"],
-        ["恒温时长", f"{hold_h:.1f} h", f"占全程 {hold_h / dur:.0%}" if dur else "—"],
-        ["降温段", f"{cool_h:.1f} h", (f"平均 {cool_txt}" if cool_rate else "—")],
+        ["涂层中时长", f"{hold_h:.1f} h", f"占全程 {hold_h / dur:.0%}" if dur else "—"],
+        [f"{L(phases.POST)}", f"{cool_h:.1f} h", (f"平均 {cool_txt}" if cool_rate else "—")],
         ["真空范围", f"{vv.min():,.0f} ~ {vv.max():,.0f} Pa" if vv.size else "—",
          f"蝶阀 {int(round(mv.min()))}~{int(round(mv.max()))}°" if mv.size else "—"],
     ]
@@ -634,14 +645,16 @@ def build_overview(proc: pd.DataFrame, steps: list[dict]) -> dict:
             type_cnt[s["ftype"]] = type_cnt.get(s["ftype"], 0) + 1
     top = sorted(type_cnt.items(), key=lambda kv: -kv[1])[:3]
     hold_txt = "、".join(
-        f"步{s['id']} {s['T0']:.1f}→{s['T1e']:.1f}℃" for s in by_ph["恒温"]
+        f"步{s['id']} {s['T0']:.1f}→{s['T1e']:.1f}℃" for s in by_ph[phases.HOLD]
         if s.get("T0") is not None and s.get("T1e") is not None) or "—"
     txt = [
-        f"全程 {len(steps)} 个步次、{dur:.1f} h（{dur / 24:.1f} 天）；升温 {len(by_ph['升温'])} 步、"
-        f"恒温 {len(by_ph['恒温'])} 步、降温 {len(by_ph['降温'])} 步。",
-        f"最高主控温度 {Tmax:.1f}℃（{t_at_max:.1f} h 处）；恒温段 {hold_txt}，累计 {hold_h:.1f} h。",
-        (f"降温段 {len(cool)} 步、{cool_h:.1f} h，由 {cool[0]['T0']:.1f}℃ 降到 {cool[-1]['T1e']:.1f}℃，"
-         f"平均 {cool_txt}。" if cool_rate else f"降温段 {len(cool)} 步、{cool_h:.1f} h。"),
+        f"全程 {len(steps)} 个步次、{dur:.1f} h（{dur / 24:.1f} 天）；{L(phases.PRE)} "
+        f"{len(by_ph[phases.PRE])} 步、{L(phases.HOLD)} {len(by_ph[phases.HOLD])} 步、"
+        f"{L(phases.POST)} {len(by_ph[phases.POST])} 步。",
+        f"最高主控温度 {Tmax:.1f}℃（{t_at_max:.1f} h 处）；{L(phases.HOLD)} {hold_txt}，累计 {hold_h:.1f} h。",
+        (f"{L(phases.POST)} {len(cool)} 步、{cool_h:.1f} h，由 {cool[0]['T0']:.1f}℃ 降到 "
+         f"{cool[-1]['T1e']:.1f}℃，平均 {cool_txt}。"
+         if cool_rate else f"{L(phases.POST)} {len(cool)} 步、{cool_h:.1f} h。"),
         "判型分布：" + "、".join(f"{k} {v} 步" for k, v in top) +
         (f"；真空 {vv.min():,.0f}~{vv.max():,.0f} Pa 跨 "
          f"{np.log10(vv.max() / max(vv.min(), 1e-9)):.1f} 个数量级。" if vv.size else "。"),
@@ -664,7 +677,7 @@ def build_overview(proc: pd.DataFrame, steps: list[dict]) -> dict:
 # ------------------------------------------------------------------ 主流程
 def build_report(st: pd.DataFrame, proc: pd.DataFrame, segT: pd.DataFrame, segV: pd.DataFrame,
                  batch: str, note: str = "", tag: str = "", outdir: str | None = None,
-                 n_steps_recipe: int | None = None) -> str:
+                 n_steps_recipe: int | None = None, hold: int | None = None) -> str:
     """把「步表 + 过程数据 + 拟合段」装配成单文件 HTML，返回路径。
 
     入参全部是 DataFrame，因此有两条来源完全兼容：
@@ -676,6 +689,11 @@ def build_report(st: pd.DataFrame, proc: pd.DataFrame, segT: pd.DataFrame, segV:
         st["_n"] = st["步号"].astype(str).str.split("(").str[0].astype(int)
         st["_p"] = st["步号"].astype(str).str.extract(r"\((\d+)\)").fillna(1).astype(int)
 
+    # 阶段划分：涂层中 = 该批 recipe 时长最长的一步（29C 恰为步25，25C261007 为步32）
+    if hold is None:
+        hold = phases.hold_of(tag or batch)
+    phases.set_active(int(hold), tag or batch)
+
     steps = []
     for _, row in st.sort_values(["_n", "_p"]).iterrows():
         try:
@@ -683,8 +701,13 @@ def build_report(st: pd.DataFrame, proc: pd.DataFrame, segT: pd.DataFrame, segV:
         except Exception as e:                     # 单步失败不影响整体
             print(f"  ! 步{row['步号']} 跳过：{e}")
 
-    ov = build_overview(proc, steps)
-    data = dict(batch=batch, note=note, tag=tag or batch, steps=steps, ov=ov)
+    # 阶段方向（升温/恒温/降温）由实测温度净变化判定，标签形如「涂层前·升温」
+    plab = phases.labels_from_steps(steps)
+    for s in steps:
+        s["plab"] = plab.get(s["phase"], s["phase"])
+    ov = build_overview(proc, steps, plab)
+    data = dict(batch=batch, note=note, tag=tag or batch, hold=int(hold),
+                plab=plab, steps=steps, ov=ov)
     payload = json.dumps(data, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
 
     outdir = outdir or OUTDIR
@@ -777,9 +800,19 @@ TEMPLATE = r"""<!DOCTYPE html>
   header .spacer{flex:1}
 
   /* ---------- 两栏骨架：窄窗口自动变一栏 ---------- */
-  .wrap{display:grid;grid-template-columns:132px minmax(0,1fr);gap:14px;
+  /* 左栏 140px：其中 6px 是常驻给滚动条的（scrollbar-gutter:stable），
+     实际内容宽度仍 ≈ 134px ≈ 旧版 132px；不加这两条时，出现滚动条会从 132px 里
+     硬挤出 ~15px，4 列步号每列少 ~4px，'13(2)' 这类长标签直接被压掉。 */
+  .wrap{display:grid;grid-template-columns:140px minmax(0,1fr);gap:14px;
         padding:14px 18px 24px;align-items:start}
-  aside{position:sticky;top:62px;align-self:start;max-height:calc(100vh - 78px);overflow:auto}
+  aside{position:sticky;top:62px;align-self:start;max-height:calc(100vh - 78px);
+        overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;
+        scrollbar-gutter:stable;scrollbar-width:thin;scrollbar-color:#ced4da transparent;
+        padding-right:2px}
+  aside::-webkit-scrollbar{width:6px}
+  aside::-webkit-scrollbar-track{background:transparent}
+  aside::-webkit-scrollbar-thumb{background:#ced4da;border-radius:3px}
+  aside::-webkit-scrollbar-thumb:hover{background:#adb5bd}
   .phasegrp{margin-bottom:10px}
   .phasegrp h4{margin:0 0 4px;font-size:11.5px;color:var(--sub);font-weight:600;letter-spacing:.5px}
   .phasegrp h4 .nb{float:right;font-style:normal;font-weight:700;font-size:10.5px;line-height:1.5;
@@ -792,9 +825,9 @@ TEMPLATE = r"""<!DOCTYPE html>
         overflow:hidden}
   .sbtn:hover{border-color:#adb5bd}
   .sbtn.on{color:#fff;border-color:transparent;font-weight:700}
-  .sbtn.on[data-p="升温"]{background:var(--orange)}
-  .sbtn.on[data-p="恒温"]{background:var(--blue)}
-  .sbtn.on[data-p="降温"]{background:var(--green)}
+  .sbtn.on[data-p="涂层前"]{background:var(--orange)}
+  .sbtn.on[data-p="涂层中"]{background:var(--blue)}
+  .sbtn.on[data-p="涂层后"]{background:var(--green)}
   .sbtn.ov{width:100%;border-radius:8px;font-weight:600}
   .sbtn.ov.on{background:var(--blue)}
   /* ---------- 步级判定标注：未达标(红) / 未达标(过渡)(琥珀) ----------
@@ -902,7 +935,9 @@ TEMPLATE = r"""<!DOCTYPE html>
        ⚠️ 横向滚动只交给 #stepList——若让 aside 自己滚，滚动步号时图例会被一起推出视野 */
     aside{position:static;max-height:none;overflow:visible;display:block;
           padding:6px 2px 8px;border-bottom:1px solid var(--line)}
-    aside #stepList{overflow-x:auto;white-space:nowrap}
+    aside{scrollbar-gutter:auto}
+    aside #stepList{overflow-x:auto;white-space:nowrap;scrollbar-width:thin;
+                    scrollbar-color:#ced4da transparent}
     aside .phasegrp{display:inline-flex;align-items:center;gap:6px;margin:0 14px 0 0;
                     vertical-align:middle}
     aside .phasegrp h4{margin:0;white-space:nowrap}
@@ -1021,8 +1056,9 @@ TEMPLATE = r"""<!DOCTYPE html>
     if (want) cur = want;
   }
 
-  const PH_ORDER = ["升温","恒温","降温"];
-  const PHC = { "升温":"#f76707", "恒温":"#1864ab", "降温":"#2f9e44" };
+  const PH_ORDER = ["涂层前","涂层中","涂层后"];
+  const PHC = { "涂层前":"#f76707", "涂层中":"#1864ab", "涂层后":"#2f9e44" };
+  const PLAB = DATA.plab || {};         // {涂层前:'涂层前·升温', …} 方向由实测温度净变化判定
 
   /* ---------- 左侧步号（含步级判定标注） ---------- */
   // 标注只表达"这一步有没有达到 recipe 设定"，判定值本身来自需求6 产物（不在此重算）
@@ -1053,7 +1089,7 @@ TEMPLATE = r"""<!DOCTYPE html>
       // 阶段标题只放"未达标"计数（过渡/过程逆反不占标题位，交给图例与悬停）
       const tag = bad ? '<i class="nb bad" title="本阶段未达标 ' + bad + ' 步">' + bad + '</i>'
                 : (warn ? '<i class="nb warn" title="本阶段过渡步 ' + warn + ' 步">' + warn + '</i>' : '');
-      return '<div class="phasegrp"><h4>' + p + '（' + groups[p].length + '）' + tag + '</h4>' +
+      return '<div class="phasegrp"><h4>' + (PLAB[p] || p) + '（' + groups[p].length + '）' + tag + '</h4>' +
              '<div class="grid">' + btns + '</div></div>';
     }).join("");
     host.querySelectorAll(".sbtn").forEach(b =>
@@ -1126,7 +1162,7 @@ TEMPLATE = r"""<!DOCTYPE html>
       if (w < total * 0.05 || seen[b.ph]) return;
       seen[b.ph] = 1;
       out.push({ xref: "x", yref: "paper", x: (b.t0 + b.t1) / 2, y: 0.99, yanchor: "top",
-                 text: b.ph, showarrow: false,
+                 text: b.plab || b.ph, showarrow: false,
                  font: { size: 11.5, color: PHC[b.ph] } });
     });
     return out;
@@ -1348,7 +1384,7 @@ TEMPLATE = r"""<!DOCTYPE html>
 
     document.getElementById("meta").innerHTML =
       '<div class="meta-head">' +
-        '<span class="step-tag" style="color:' + phc + '">' + s.phase + ' · 步 ' + s.id + '</span>' +
+        '<span class="step-tag" style="color:' + phc + '">' + (s.plab || s.phase) + ' · 步 ' + s.id + '</span>' +
         '<span class="vset">' + vitems(s) + '</span>' +
         '<span class="nav"><button id="prev">← 上一步</button>' +
         '<button id="next">下一步 →</button></span>' +

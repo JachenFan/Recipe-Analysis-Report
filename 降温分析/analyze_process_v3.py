@@ -45,6 +45,7 @@ from temp_fix import apply_to_frame, T_SWITCH, T_CONSIST, diag as t_diag, diag_t
 from batch_notes import ops_text  # noqa: E402  人为操作记录（现场确认，单一事实来源）
 from recipe_meta import missing_steps, missing_text  # noqa: E402  缺失步检测（不得静默丢失）
 from seg_terms import terms  # noqa: E402  分段类型领域话术（单一事实来源）
+import phases  # noqa: E402  阶段划分（涂层前/中/后，单一事实来源）
 
 warnings.filterwarnings("ignore")
 rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "DejaVu Sans"]
@@ -441,7 +442,7 @@ def analyze(el_raw, temp_raw, t1_raw, t2_raw, tsp, dt, phase):
                         res["fall"] = sum(s["dT"] for s in dn) / sum(s["t1"] - s["t0"] for s in dn)
                     if up:
                         res["rise"] = sum(s["dT"] for s in up) / sum(s["t1"] - s["t0"] for s in up)
-                    res["rec"] = res["fall"] if phase == "降温" else res["rise"]
+                    res["rec"] = res["fall"] if _cool_phase(phase) else res["rise"]
                     res["r2"] = piecewise_r2(wz, el, temp)
                     return res
 
@@ -496,7 +497,7 @@ def analyze(el_raw, temp_raw, t1_raw, t2_raw, tsp, dt, phase):
 
     if len(segs) >= 3 and rev >= 2 and path > 0 and abs(net) <= WAVE_NET * path:
         res["type"] = T_WAVE
-        res["rec"] = res["fall"] if phase == "降温" else res["rise"]
+        res["rec"] = res["fall"] if _cool_phase(phase) else res["rise"]
     else:
         res["type"] = T_MULTI
         dom = max(segs, key=lambda s: abs(s["dT"]))
@@ -506,11 +507,32 @@ def analyze(el_raw, temp_raw, t1_raw, t2_raw, tsp, dt, phase):
 
 
 # ---------------------------------------------------------------- 绘图
-PHASES = [("升温", 1, 24, "#ffe8cc"), ("恒温", 25, 25, "#d0ebff"), ("降温", 26, 45, "#d3f9d8")]
+# 阶段底色（阶段名 -> 颜色）；具体步号区间由实际步次生成，见 phase_bands()
+PHASE_BG = {phases.PRE: "#ffe8cc", phases.HOLD: "#d0ebff", phases.POST: "#d3f9d8"}
 
 
-def phase_of(s):
-    return "升温" if s <= 24 else ("恒温" if s == 25 else "降温")
+def phase_of(s, hold=None):
+    """步号 -> 阶段（涂层前/涂层中/涂层后）。口径见 `phases.py`。"""
+    return phases.phase_of(s, hold)
+
+
+def phase_bands(bounds):
+    """[(阶段名, t0, t1, 底色)] —— 按实际步次起止时间生成，不写死步号区间。"""
+    out = []
+    for ph in phases.BASE:
+        ts = [bounds[k] for k in bounds if phases.phase_of(k[0]) == ph]
+        if ts:
+            out.append((ph, min(a for a, _ in ts), max(b for _, b in ts), PHASE_BG[ph]))
+    return out
+
+
+def _cool_phase(phase):
+    """该步所属阶段是否为"温度下降段"。
+
+    兼容两种入参：新阶段基名（`涂层后`）与旧字面量（`降温`）——
+    波浪式曲线的推荐速率要取"与本阶段方向一致"的那一段（fall/rise）。
+    """
+    return str(phase) in ("降温", phases.POST)
 
 
 def plot_overview(tag, label, proc):
@@ -539,15 +561,12 @@ def plot_overview(tag, label, proc):
     ax[1].plot(X, P, color=C_PWR, lw=0.7, label="电源总功率反馈")
     ax[1].set_ylabel("电源总功率 (kW)"); ax[1].legend(loc="upper right"); ax[1].grid(alpha=0.25)
     ax[1].set_xlabel("累计时间 (min，自首步起)")
-    for name, a, b, c in PHASES:
-        xs = [bounds[k][0] for k in bounds if a <= k[0] <= b]
-        xe = [bounds[k][1] for k in bounds if a <= k[0] <= b]
-        if xs:
-            for axx in ax:
-                axx.axvspan(min(xs), max(xe), color=c, alpha=0.45, zorder=0)
-            ax[0].text((min(xs) + max(xe)) / 2, ax[0].get_ylim()[1], name,
-                       ha="center", va="top", fontsize=12, color="#343a40", weight="bold")
-    fig.suptitle(f"工艺全程总览  {label}（升温/恒温/降温 三段）", fontsize=15)
+    for name, x0, x1, c in phase_bands(bounds):
+        for axx in ax:
+            axx.axvspan(x0, x1, color=c, alpha=0.45, zorder=0)
+        ax[0].text((x0 + x1) / 2, ax[0].get_ylim()[1], name,
+                   ha="center", va="top", fontsize=12, color="#343a40", weight="bold")
+    fig.suptitle(f"工艺全程总览  {label}（涂层前 / 涂层中 / 涂层后 三段）", fontsize=15)
     fig.tight_layout(rect=[0, 0, 1, 0.96])
     p = os.path.join(FIG, f"{tag}_全程总览.png")
     fig.savefig(p, dpi=140, facecolor="white"); plt.close(fig)
@@ -678,7 +697,7 @@ def plot_hold(tag, label, proc, key):
     ax[0].axhspan(tsp - BAND_ABS, tsp + BAND_ABS, color="#ffd43b", alpha=0.15,
                   label=f"±{BAND_ABS}℃ 参考恒温带")
     ax[0].set_ylabel("主控温度 (℃)"); ax[0].legend(fontsize=9, loc="best"); ax[0].grid(alpha=0.25)
-    ax[0].set_title(f"恒温段（步号 {s}）{label}   时长 {el[-1]:.1f} h   "
+    ax[0].set_title(f"涂层中（步号 {s}）{label}   时长 {el[-1]:.1f} h   "
                     f"均值 {np.mean(temp):.2f}℃   极差 {pp:.2f}℃", fontsize=12)
     ax[1].plot(el[::k], sub[PCOL].to_numpy()[ok][::k], color=C_PWR, lw=0.7, label="电源总功率反馈")
     ax[1].set_ylabel("总功率 (kW)"); ax[1].set_xlabel("时间 (h)"); ax[1].legend(fontsize=9); ax[1].grid(alpha=0.25)
@@ -702,12 +721,12 @@ def plot_rate_summary(tag, label, rows, phase):
     ax.set_xticks(x)
     ax.set_xticklabels([f"{r['lbl']}\n{r['type']}" for r in rows], fontsize=7, rotation=45)
     ax.set_ylabel("速率 (℃/min)")
-    ax.set_title(f"{phase}段 各步速率（{label}，按曲线类型选用方法）  负=降温 / 正=升温", fontsize=13)
+    ax.set_title(f"{phase} 各步速率（{label}，按曲线类型选用方法）  负=降温 / 正=升温", fontsize=13)
     for xi, v in zip(x, vals):
         ax.text(xi, v, f"{v:+.2f}", ha="center", va="bottom" if v >= 0 else "top", fontsize=7)
     ax.grid(alpha=0.25, axis="y")
     fig.tight_layout()
-    p = os.path.join(FIG, f"{tag}_{phase}段速率.png")
+    p = os.path.join(FIG, f"{tag}_{phase}速率.png")
     fig.savefig(p, dpi=140, facecolor="white"); plt.close(fig)
     return p
 
@@ -810,7 +829,7 @@ def main():
             ph = phase_of(s)
             r = analyze(el, temp, t1, t2, tsp, dt, ph)
             pwr = sub[PCOL].astype(float).to_numpy()
-            if ph == "降温":
+            if _cool_phase(ph):
                 nz = pwr[pwr > 1.0]
                 heater_on = (len(nz) / len(pwr) >= 0.05) and (np.median(nz) >= 5 if len(nz) else False)
                 okp = np.ones(len(pwr), bool) if not heater_on else pwr > 1.0
@@ -833,7 +852,7 @@ def main():
                 add = (f"主控温度曾冻结于 T1 量程上限 {T1SAT}℃（失效点 {r['n_frozen']} 个已剔除）"
                        f"，随后测温通道切至 T2；本步含通道切换，速率仅供参考")
                 note = (note + "；" if note else "") + add
-            if r["type"] == T_FLAT and ph == "降温":
+            if r["type"] == T_FLAT and _cool_phase(ph):
                 rs = sets.get(s)
                 if rs and abs(rs - r["tsp"]) > 3:
                     note += f"；停滞于 {r['T1']:.0f}℃，未达设定值 {rs:.0f}℃"
@@ -868,24 +887,28 @@ def main():
                                     段温变=round(sg["dT"], 2), 段速率=round(sg["slope"], 4),
                                     段R2=round(sg["r2"], 4) if sg["r2"] == sg["r2"] else None,
                                     点数=sg["n"], 方向="下降" if sg["slope"] < 0 else "上升"))
-            if ph == "降温":
+            if _cool_phase(ph):
                 for e, v in zip(el[r["_okp"]], pwr[r["_okp"]]):
                     power_rows.append(dict(炉次=tag, 步号=lbl, 相对时间_min=round(float(e), 3),
                                            电源总功率=round(float(v), 3)))
         # ---- 图 ----
         figures.append(plot_overview(tag, label, proc))
-        heat = [k for k in order if 1 <= k[0] <= 24]
-        cool = [k for k in order if k[0] >= 26]
-        holdk = [k for k in order if k[0] == 25]
+        heat = [k for k in order if k[0] < hold]
+        cool = [k for k in order if k[0] > hold]
+        holdk = [k for k in order if k[0] == hold]
+        _span = lambda ks: (f"步{min(k[0] for k in ks)}–{max(k[0] for k in ks)}" if ks else "—")
         figures.append(plot_step_grid(tag, label, proc, res, sets, heat, "temp",
-                                      f"{tag}_升温段分步曲线.png", "升温段 分步曲线（步1–24，按类型拟合）"))
+                                      f"{tag}_涂层前分步曲线.png",
+                                      f"涂层前 分步曲线（{_span(heat)}，按类型拟合）"))
         figures.append(plot_step_grid(tag, label, proc, res, sets, cool, "temp",
-                                      f"{tag}_降温段分步曲线.png", "降温段 分步曲线（步26–45，按类型拟合）"))
+                                      f"{tag}_涂层后分步曲线.png",
+                                      f"涂层后 分步曲线（{_span(cool)}，按类型拟合）"))
         figures.append(plot_step_grid(tag, label, proc, res, sets, cool, "power",
-                                      f"{tag}_降温段分步功率曲线.png", "降温段 分步功率曲线（步26–45）"))
+                                      f"{tag}_涂层后分步功率曲线.png",
+                                      f"涂层后 分步功率曲线（{_span(cool)}）"))
         if holdk:
             figures.append(plot_hold(tag, label, proc, holdk[0]))
-        for ph in ["升温", "降温"]:
+        for ph in (phases.PRE, phases.POST):
             rr = [dict(phase=ph, order=i, lbl=(f"{s}" + (f"({p})" if p > 1 else "")),
                        rec=res[(s, p)]["rec"], type=res[(s, p)]["type"])
                   for i, (s, p) in enumerate(order) if phase_of(s) == ph]

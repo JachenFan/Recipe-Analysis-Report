@@ -13,6 +13,7 @@
 !降温分析/analyze_process_v3.py
 !降温分析/analyze_vacuum_v4.py
 !降温分析/analyze_v6.py
+!降温分析/phases.py
 !降温分析/temp_fix.py
 !降温分析/batch_notes.py
 !降温分析/seg_terms.py

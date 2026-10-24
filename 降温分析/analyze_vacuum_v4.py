@@ -48,6 +48,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from seg_terms import terms as _terms  # noqa: E402  分段类型领域话术（单一事实来源）
 from batch_notes import ops_text  # noqa: E402  人为操作记录（现场确认，单一事实来源）
 from recipe_meta import missing_steps, missing_text  # noqa: E402  缺失步检测（不得静默丢失）
+import phases  # noqa: E402  阶段划分（涂层前/中/后，单一事实来源）
 
 warnings.filterwarnings("ignore")
 rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "DejaVu Sans"]
@@ -117,20 +118,30 @@ RATE_MEAN = {
 
 
 # ---------------------------------------------------------------- 数据
-def load_process(tag):
-    """按步号回退点切分炉次：只保留到『含长时间恒温步25』的主工艺段"""
+def load_process(tag, hold=None):
+    """按步号回退点切分炉次：只保留到『含「涂层中」步』的主工艺段。
+
+    `hold` 缺省由 `phases.hold_of(tag)` 从该批 recipe 现算——
+    原实现写死"含步25 的段"，只对 29C 机台成立（25C261007 的涂层段在步32）。
+    """
     df = pd.read_csv(os.path.join(SIMU, f"_{tag}_vac.csv"))
     df["时间"] = pd.to_datetime(df["时间"])
     df = df.dropna(subset=["当前运行步号"]).sort_values("时间").reset_index(drop=True)
     df["step"] = df["当前运行步号"].astype(int)
     st = df["step"].to_numpy()
     df["seg"] = np.cumsum(np.concatenate([[True], np.diff(st) < 0]))
-    seg_ids = df["seg"].unique()
-    main_seg = seg_ids[0]
-    for sid in seg_ids:
-        if 25 in set(df.loc[df["seg"] == sid, "step"]):
-            main_seg = sid
-            break
+    seg_ids = list(df["seg"].unique())
+    if hold is None:
+        hold = phases.hold_of(tag)
+    if (df["step"] == hold).any():
+        main_seg = seg_ids[0]
+        for sid in seg_ids:
+            if hold in set(df.loc[df["seg"] == sid, "step"]):
+                main_seg = sid
+                break
+    else:
+        # log 被截断/该步未执行：取记录最多的段（主工艺段必然最长）
+        main_seg = max(seg_ids, key=lambda sid: int((df["seg"] == sid).sum()))
     proc = df[df["seg"] <= main_seg].reset_index(drop=True)
     dropped = int((df["seg"] > main_seg).sum())
     passes = np.ones(len(proc), int)
@@ -392,7 +403,7 @@ def analyze_one(el, temp, sp, dt, S, phase):
                 if path > 0 and abs(net) <= WAVE_NET * path:
                     res.update(type=T_WAVE, segs=wz, n_seg=len(wz))
                     _rates(res, wz)
-                    res["rec"] = res["fall"] if phase == "降温" else res["rise"]
+                    res["rec"] = res["fall"] if _cool_phase(phase) else res["rise"]
                     res["r2"] = piecewise_r2(wz, el, temp)
                     return res
 
@@ -429,7 +440,7 @@ def analyze_one(el, temp, sp, dt, S, phase):
     path = sum(abs(s["dT"]) for s in segs)
     if len(segs) >= 3 and rev >= 2 and path > 0 and abs(net) <= WAVE_NET * path:
         res.update(type=T_WAVE)
-        res["rec"] = res["fall"] if phase == "降温" else res["rise"]
+        res["rec"] = res["fall"] if _cool_phase(phase) else res["rise"]
     else:
         res.update(type=T_MULTI, rec=max(segs, key=lambda s: abs(s["dT"]))["slope"])
     res["r2"] = piecewise_r2(segs, el, temp)
@@ -528,11 +539,27 @@ def analyze(el_raw, temp_raw, hi_raw, lo_raw, sp, dt, phase, S):
 
 
 # ---------------------------------------------------------------- 绘图
-PHASES = [("升温", 1, 24, "#ffe8cc"), ("恒温", 25, 25, "#d0ebff"), ("降温", 26, 45, "#d3f9d8")]
+PHASE_BG = {phases.PRE: "#ffe8cc", phases.HOLD: "#d0ebff", phases.POST: "#d3f9d8"}
 
 
-def phase_of(s):
-    return "升温" if s <= 24 else ("恒温" if s == 25 else "降温")
+def phase_of(s, hold=None):
+    """步号 -> 阶段（涂层前/涂层中/涂层后）。口径见 `phases.py`。"""
+    return phases.phase_of(s, hold)
+
+
+def phase_bands(bounds):
+    """[(阶段名, t0, t1, 底色)] —— 按实际步次起止时间生成，不写死步号区间。"""
+    out = []
+    for ph in phases.BASE:
+        ts = [bounds[k] for k in bounds if phases.phase_of(k[0]) == ph]
+        if ts:
+            out.append((ph, min(a for a, _ in ts), max(b for _, b in ts), PHASE_BG[ph]))
+    return out
+
+
+def _cool_phase(phase):
+    """阶段是否为"下降段"（兼容新阶段基名与旧字面量『降温』）。"""
+    return str(phase) in ("降温", phases.POST)
 
 
 def _step_series(proc, key):
@@ -559,14 +586,11 @@ def plot_overview(tag, label, proc):
     ax[1].plot(X, B, color=C_MV, lw=0.7, label=f"{MV} ({U_MV})")
     ax[1].set_ylabel(f"{MV} ({U_MV})"); ax[1].legend(loc="upper right"); ax[1].grid(alpha=0.25)
     ax[1].set_xlabel("累计时间 (min，自首步起)")
-    for name, a, b, c in PHASES:
-        xs = [bounds[k][0] for k in bounds if a <= k[0] <= b]
-        xe = [bounds[k][1] for k in bounds if a <= k[0] <= b]
-        if xs:
-            for axx in ax:
-                axx.axvspan(min(xs), max(xe), color=c, alpha=0.45, zorder=0)
-            ax[0].text((min(xs) + max(xe)) / 2, ax[0].get_ylim()[1], name,
-                       ha="center", va="top", fontsize=12, color="#343a40", weight="bold")
+    for name, x0, x1, c in phase_bands(bounds):
+        for axx in ax:
+            axx.axvspan(x0, x1, color=c, alpha=0.45, zorder=0)
+        ax[0].text((x0 + x1) / 2, ax[0].get_ylim()[1], name,
+                   ha="center", va="top", fontsize=12, color="#343a40", weight="bold")
     fig.suptitle(f"工艺全程总览（真空度 / 蝶阀开度）  {label}", fontsize=15)
     fig.tight_layout(rect=[0, 0, 1, 0.96])
     p = os.path.join(FIG, f"{tag}_全程总览.png")
@@ -655,7 +679,7 @@ def plot_hold(tag, label, proc, key):
     ax[0].plot(el[::k], v[::k], color=C_PV, lw=0.7, label=PV)
     ax[0].axhline(sp, color=C_SP, ls="--", lw=1.0, label=f"目标压力 {sp:.0f} {U_PV}")
     ax[0].set_ylabel(f"{PV} ({U_PV})"); ax[0].legend(fontsize=9, loc="best"); ax[0].grid(alpha=0.25)
-    ax[0].set_title(f"恒温段（步号 {s}）{label}   时长 {el[-1]:.1f} h   均值 {np.mean(v):.0f} {U_PV}   "
+    ax[0].set_title(f"涂层中（步号 {s}）{label}   时长 {el[-1]:.1f} h   均值 {np.mean(v):.0f} {U_PV}   "
                     f"极差 {np.ptp(v):.0f} {U_PV}   相对波动 {np.ptp(v)/max(np.mean(v),1e-9):.2%}", fontsize=12)
     ax[1].plot(el[::k], b[::k], color=C_MV, lw=0.7, label=MV)
     ax[1].set_ylabel(f"蝶阀开度 ({U_MV})"); ax[1].set_xlabel("时间 (h)")
@@ -680,12 +704,12 @@ def plot_rate_summary(tag, label, rows, phase):
     ax.set_xticks(x)
     ax.set_xticklabels([f"{r['lbl']}\n{r['type']}" for r in rows], fontsize=7, rotation=45)
     ax.set_ylabel(f"速率 ({U_PV}/min)")
-    ax.set_title(f"{phase}段 各步真空度速率（{label}，按曲线类型选用方法）  负=压力下降(真空变好)", fontsize=13)
+    ax.set_title(f"{phase} 各步真空度速率（{label}，按曲线类型选用方法）  负=压力下降(真空变好)", fontsize=13)
     for xi, v in zip(x, vals):
         ax.text(xi, v, f"{v:+.0f}", ha="center", va="bottom" if v >= 0 else "top", fontsize=7)
     ax.grid(alpha=0.25, axis="y")
     fig.tight_layout()
-    p = os.path.join(FIG, f"{tag}_{phase}段速率.png")
+    p = os.path.join(FIG, f"{tag}_{phase}速率.png")
     fig.savefig(p, dpi=140, facecolor="white"); plt.close(fig)
     return p
 
@@ -773,7 +797,9 @@ def main():
     stats, segrows, mv_rows, figures, notes = [], [], [], [], []
     run_meta = {}      # tag -> dict(label, log_last, recipe_last, missing)（说明页按实际数据生成）
     for tag, label, src in RUNS:
-        proc, dropped = load_process(tag)
+        hold = phases.hold_of(tag)               # 涂层中 = 本批 recipe 时长最长的一步
+        phases.set_active(hold, tag)
+        proc, dropped = load_process(tag, hold=hold)
         S = global_scale(proc)
         _rp, _rs = load_recipe_meta(tag)
         _log_last = int(proc["step"].max())
@@ -872,25 +898,26 @@ def main():
                                     段变化=round(pl["dT"], 1), 段速率=round(pl["slope"], 3),
                                     段R2=round(pl["r2"], 4) if pl["r2"] == pl["r2"] else None,
                                     点数=pl["n"], 方向=_P["platform"]))
-            if ph == "降温":
+            if _cool_phase(ph):
                 for e, val in zip(r["_el"], r["_mv"]):
                     mv_rows.append(dict(炉次=tag, 步号=lbl, 相对时间_min=round(float(e), 3),
                                         数控蝶阀开度反馈=round(float(val), 4)))
         figures.append(plot_overview(tag, label, proc))
-        heat = [k for k in order if 1 <= k[0] <= 24]
-        cool = [k for k in order if k[0] >= 26]
-        holdk = [k for k in order if k[0] == 25]
+        heat = [k for k in order if k[0] < hold]
+        cool = [k for k in order if k[0] > hold]
+        holdk = [k for k in order if k[0] == hold]
+        _span = lambda ks: (f"步{min(k[0] for k in ks)}–{max(k[0] for k in ks)}" if ks else "—")
         figures.append(plot_step_grid(tag, label, proc, res, heat, "pv",
-                                      f"{tag}_升温段分步真空曲线.png", "升温段 分步真空度曲线（步1–24）"))
+                                      f"{tag}_涂层前分步真空曲线.png", f"涂层前 分步真空度曲线（{_span(heat)}）"))
         figures.append(plot_step_grid(tag, label, proc, res, cool, "pv",
-                                      f"{tag}_降温段分步真空曲线.png", "降温段 分步真空度曲线（步26–45）"))
+                                      f"{tag}_涂层后分步真空曲线.png", f"涂层后 分步真空度曲线（{_span(cool)}）"))
         figures.append(plot_step_grid(tag, label, proc, res, heat, "mv",
-                                      f"{tag}_升温段分步蝶阀曲线.png", "升温段 分步蝶阀开度曲线（步1–24）"))
+                                      f"{tag}_涂层前分步蝶阀曲线.png", f"涂层前 分步蝶阀开度曲线（{_span(heat)}）"))
         figures.append(plot_step_grid(tag, label, proc, res, cool, "mv",
-                                      f"{tag}_降温段分步蝶阀曲线.png", "降温段 分步蝶阀开度曲线（步26–45）"))
+                                      f"{tag}_涂层后分步蝶阀曲线.png", f"涂层后 分步蝶阀开度曲线（{_span(cool)}）"))
         if holdk:
             figures.append(plot_hold(tag, label, proc, holdk[0]))
-        for ph in ["升温", "降温"]:
+        for ph in (phases.PRE, phases.POST):
             rr = [dict(phase=ph, order=i, lbl=(f"{s}" + (f"({p})" if p > 1 else "")),
                        rec=res[(s, p)]["rec"], type=res[(s, p)]["type"])
                   for i, (s, p) in enumerate(order) if phase_of(s) == ph]

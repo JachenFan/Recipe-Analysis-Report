@@ -50,6 +50,7 @@ import analyze_process_v3 as v3              # noqa: E402
 import analyze_vacuum_v4 as v4               # noqa: E402
 import analyze_v6 as v6                      # noqa: E402
 import batch_notes                           # noqa: E402
+import phases                                # noqa: E402
 import temp_fix                              # noqa: E402
 
 CACHE_DIR = os.path.join(_HERE, "_cache")
@@ -149,12 +150,16 @@ def load_recipe_any(path, sheet=None, verbose=True):
 
 
 # ------------------------------------------------------------------ 抽取
-def ingest_log(path, cache=True, verbose=True):
-    """log Excel -> 主工艺段 proc（已含需求7 温度口径与 pass 标注）。"""
+def ingest_log(path, cache=True, verbose=True, hold=None):
+    """log Excel -> 主工艺段 proc（已含需求7 温度口径与 pass 标注）。
+
+    `hold` = 该批「涂层中」步号（recipe 里时长最长的一步），主工艺段按它切分；
+    缺省时按「记录最多的段」兜底，并给出提示（写死步25 的口径已废弃）。
+    """
     df = read_log(path, cache=cache, verbose=verbose)
     if verbose:
         print(f"  · 原始 {len(df)} 行，切分主工艺段 + 温度口径修正…")
-    proc, dropped = v5.prepare_log(df, key="__batch__")
+    proc, dropped = v5.prepare_log(df, key="__batch__", hold=hold)
     info = dict(path=os.path.abspath(path), rows_raw=int(len(df)),
                 rows_proc=int(len(proc)), dropped=int(dropped),
                 t0=proc["时间"].iloc[0], t1=proc["时间"].iloc[-1],
@@ -168,8 +173,8 @@ def ingest_log(path, cache=True, verbose=True):
               f"{info['t0']:%Y-%m-%d %H:%M} → {info['t1']:%Y-%m-%d %H:%M}"
               + (f"，剔除尾部残段 {dropped} 行" if dropped else ""))
         print(f"  · 温度口径：{mode}")
-    if 25 not in set(proc["step"]):
-        print("  ! 未找到恒温步25——主工艺段切分与阶段归属依赖该步，请核对 log 是否完整")
+    if hold is not None and hold not in set(proc["step"]):
+        print(f"  ! 未找到「涂层中」步{hold}——log 是否被截断？主工艺段已按记录最多的段兜底")
     return proc, info
 
 
@@ -235,6 +240,7 @@ def analyze_batch(proc: pd.DataFrame, recipe: dict, tag: str, label: str = "",
     判型/速率回填进 `meas` 后交给 v5.analyze_run()，得到与需求6『分步速率与结论』
     同字段的步表。
     """
+    phases.set_active(phases.hold_step(recipe), tag)   # 阶段划分：本批 recipe 的最长步
     S = v4.global_scale(proc)
     meas, segT, segV = {}, [], []
     for (s, p), sub in proc.groupby(["step", "pass"], sort=False):
@@ -326,9 +332,10 @@ def generate(recipe_path, log_path, name=None, note="", outdir=None,
         print(f"[1/4] recipe：{recipe_path}")
     recipe, rinfo = load_recipe_any(recipe_path, sheet=sheet, verbose=verbose)
 
+    hold = phases.hold_step(recipe)          # 涂层中 = recipe 时长最长的一步（本批现算）
     if verbose:
         print(f"[2/4] log：{log_path}")
-    proc, linfo = ingest_log(log_path, cache=cache, verbose=verbose)
+    proc, linfo = ingest_log(log_path, cache=cache, verbose=verbose, hold=hold)
 
     guessed = not name
     tag = name or _guess_name(recipe_path, log_path, rinfo)
@@ -342,7 +349,7 @@ def generate(recipe_path, log_path, name=None, note="", outdir=None,
     if verbose:
         print("[4/4] 生成 HTML…")
     out = mhr.build_report(st, proc, segT, segV, batch=tag, note=note, tag=tag,
-                           outdir=outdir, n_steps_recipe=rinfo["n_steps"])
+                           outdir=outdir, n_steps_recipe=rinfo["n_steps"], hold=hold)
     if open_file:
         try:
             os.startfile(out)        # noqa: S606  Windows 双击同效

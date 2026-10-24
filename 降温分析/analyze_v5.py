@@ -43,6 +43,7 @@ rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "DejaVu Sans"]
 rcParams["axes.unicode_minus"] = False
 
 import project_paths as pp
+import phases
 
 BASE = pp.ROOT
 SIMU = pp.code()
@@ -169,15 +170,26 @@ def load_recipe(path, sheet=None):
     return rec
 
 
-def phase_of(s):
-    return "升温" if s <= 24 else ("恒温" if s == 25 else "降温")
+def phase_of(s, hold=None):
+    """步号 -> 阶段（涂层前/涂层中/涂层后）。
+
+    ⚠️ 2026-10-23 起不再写死「步≤24 升温 / 步25 恒温 / 步26+ 降温」——
+    分隔节点改为 recipe 中**时长最长的一步**（见 `phases.py` 与 R13）。
+    `hold` 缺省取当前批次上下文（`phases.set_active`）。
+    """
+    return phases.phase_of(s, hold)
 
 
-def prepare_log(df, key=None):
+def prepare_log(df, key=None, hold=None):
     """DataFrame -> 主工艺段 + pass 标注 + 需求7 温度口径（load_log 的内核）。
 
     单独抽出，供「用户任选 log 文件」的场景直接喂内存 DataFrame，避免先落盘再读。
     注意：必须以 `key` 记诊断（TEMP_INFO），None 时不记。
+
+    `hold` = 「涂层中」步号（recipe 里时长最长的一步）。主工艺段按它切分：
+    **含该步的段就是主工艺段**，其后的残段（下一炉次/复机）被剔除。
+    ⚠️ 原实现写死"含步25 的段"，只对 29C 机台成立——25C261007 的涂层段在步32，
+    套用写死口径会把真正的涂层段切掉，报告只剩前半段。
     """
     df = df.copy()
     df["时间"] = pd.to_datetime(df["时间"])
@@ -185,11 +197,19 @@ def prepare_log(df, key=None):
     df["step"] = df["当前运行步号"].astype(int)
     st = df["step"].to_numpy()
     df["seg"] = np.cumsum(np.concatenate([[True], np.diff(st) < 0]))
-    main = df["seg"].unique()[0]
-    for sid in df["seg"].unique():
-        if 25 in set(df.loc[df["seg"] == sid, "step"]):
-            main = sid
-            break
+    seg_ids = list(df["seg"].unique())
+    if hold is None:
+        hold = phases.hold_of(key) if key else None
+    if hold is not None and (df["step"] == int(hold)).any():
+        main = seg_ids[0]
+        for sid in seg_ids:
+            if int(hold) in set(df.loc[df["seg"] == sid, "step"]):
+                main = sid
+                break
+    else:
+        # 缺该步（log 截断/该步未执行）：取记录最多的段——主工艺段必然最长，
+        # 比"第一段"稳（步0 待机段被单独切开时第一段可能很短）。
+        main = max(seg_ids, key=lambda sid: int((df["seg"] == sid).sum()))
     proc = df[df["seg"] <= main].reset_index(drop=True)
     dropped = int((df["seg"] > main).sum())
     passes = np.ones(len(proc), int)
@@ -212,10 +232,16 @@ def prepare_log(df, key=None):
     return proc, dropped
 
 
-def load_log(tag):
-    """按步号回退点切分：只保留含长时间恒温步25 的主工艺段；并标注重复 pass"""
+def load_log(tag, hold=None):
+    """按步号回退点切分：只保留含「涂层中」步的主工艺段；并标注重复 pass。
+
+    `hold` 缺省由 `phases.hold_of(tag)` 从该批 recipe 现算（缓存），
+    因此不再依赖"步25 就是恒温步"这一 29C 专有假设。
+    """
     df = pd.read_csv(os.path.join(SIMU, f"_{tag}_all.csv"))
-    return prepare_log(df, key=tag)
+    if hold is None:
+        hold = phases.hold_of(tag)
+    return prepare_log(df, key=tag, hold=hold)
 
 
 def step_label(s, p):
@@ -811,7 +837,7 @@ def plot_overview_dual(tag, label, recipe, proc, kind, fname, title):
     first = True
     for (s, p), (a, b) in spans.items():
         ph = phase_of(s)
-        c = {"升温": "#fff4e6", "恒温": "#e7f5ff", "降温": "#ebfbee"}[ph]
+        c = {phases.PRE: "#fff4e6", phases.HOLD: "#e7f5ff", phases.POST: "#ebfbee"}[ph]
         if p == 1:
             if not first:
                 ax.axvline(a, color="#dee2e6", lw=0.5)
@@ -1216,7 +1242,9 @@ def main():
     diags = {}             # tag -> 需求7 源系统偏差诊断（说明页按实际数据生成）
     for tag, label, rfile, d3, d4 in RUNS:
         recipe = load_recipe(rfile)
-        proc, dropped = load_log(tag)
+        hold = phases.hold_step(recipe)          # 涂层中 = 时长最长的一步（本批现算，不写死）
+        phases.set_active(hold, tag)
+        proc, dropped = load_log(tag, hold=hold)
         meas = load_measured(tag, d3, d4)
         st = analyze_run(tag, label, recipe, proc, meas)
         all_stats.append(st)
@@ -1249,25 +1277,27 @@ def main():
             ))
 
         keys = sorted(proc.groupby(["step", "pass"], sort=False).groups.keys(), key=lambda k: (k[0], k[1]))
-        heat = [k for k in keys if 1 <= k[0] <= 24]
-        cool = [k for k in keys if k[0] >= 26]
-        holdk = [k for k in keys if k[0] == 25]
+        heat = [k for k in keys if k[0] < hold]
+        cool = [k for k in keys if k[0] > hold]
+        holdk = [k for k in keys if k[0] == hold]
+        # 图标题的步号区间按**本批实际步号**生成（R4：不写死 1–24 / 26–45）
+        _span = lambda ks: (f"步{min(k[0] for k in ks)}–{max(k[0] for k in ks)}" if ks else "—")
 
         plot_overview_dual(tag, label, recipe, proc, "tp", f"{tag}_温度功率_全程双轴.png",
                            f"工艺全程 温度(左轴) vs 功率(右轴) 双纵坐标对比  {label}")
         plot_overview_dual(tag, label, recipe, proc, "vm", f"{tag}_真空蝶阀_全程双轴.png",
                            f"工艺全程 炉内真空(左轴, 对数) vs 蝶阀开度(右轴) 双纵坐标对比  {label}")
-        plot_step_grid_dual(tag, label, recipe, proc, heat, "tp", f"{tag}_温度功率_升温段双轴.png",
-                            f"升温段(步1–24) 温度 vs 功率 双纵坐标分步图  {label}", st=st)
-        plot_step_grid_dual(tag, label, recipe, proc, cool, "tp", f"{tag}_温度功率_降温段双轴.png",
-                            f"降温段(步26–45) 温度 vs 功率 双纵坐标分步图  {label}", st=st)
-        plot_step_grid_dual(tag, label, recipe, proc, heat, "vm", f"{tag}_真空蝶阀_升温段双轴.png",
-                            f"升温段(步1–24) 真空度 vs 蝶阀开度 双纵坐标分步图  {label}", st=st)
-        plot_step_grid_dual(tag, label, recipe, proc, cool, "vm", f"{tag}_真空蝶阀_降温段双轴.png",
-                            f"降温段(步26–45) 真空度 vs 蝶阀开度 双纵坐标分步图  {label}", st=st)
+        plot_step_grid_dual(tag, label, recipe, proc, heat, "tp", f"{tag}_温度功率_涂层前双轴.png",
+                            f"涂层前({_span(heat)}) 温度 vs 功率 双纵坐标分步图  {label}", st=st)
+        plot_step_grid_dual(tag, label, recipe, proc, cool, "tp", f"{tag}_温度功率_涂层后双轴.png",
+                            f"涂层后({_span(cool)}) 温度 vs 功率 双纵坐标分步图  {label}", st=st)
+        plot_step_grid_dual(tag, label, recipe, proc, heat, "vm", f"{tag}_真空蝶阀_涂层前双轴.png",
+                            f"涂层前({_span(heat)}) 真空度 vs 蝶阀开度 双纵坐标分步图  {label}", st=st)
+        plot_step_grid_dual(tag, label, recipe, proc, cool, "vm", f"{tag}_真空蝶阀_涂层后双轴.png",
+                            f"涂层后({_span(cool)}) 真空度 vs 蝶阀开度 双纵坐标分步图  {label}", st=st)
         if holdk:
-            plot_hold_dual(tag, label, recipe, proc, holdk[0], f"{tag}_恒温段步25_双轴.png",
-                           f"恒温段(步25)  {label}")
+            plot_hold_dual(tag, label, recipe, proc, holdk[0], f"{tag}_涂层中步{hold}_双轴.png",
+                           f"涂层中(步{hold})  {label}")
         collected.append((tag, label, st))
         notes_out.append(f"{tag}: log {len(proc)} 行，{len(keys)} 个步次，剔除尾部 {dropped} 行（下一炉次残段）")
 
