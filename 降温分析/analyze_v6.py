@@ -108,7 +108,7 @@ def load_fit_r2():
     """从需求3/4 的 _stats.csv 取『推荐速率』对应的拟合 R²（用于标注）"""
     out = {}
     for kind, d in [("T", "需求3_工艺全程分析"), ("V", "需求4_真空度蝶阀分析")]:
-        p = os.path.join(BASE, d, "_stats.csv")
+        p = pp.out(d, "_stats.csv")     # 需求N 产物已迁入 输出/
         s = pd.read_csv(p, encoding="utf-8-sig")
         for _, r in s.iterrows():
             out[(str(r["炉次"]), str(r["步号"]), kind)] = dict(

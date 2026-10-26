@@ -171,7 +171,7 @@ def load_process(tag):
 
 
 def recipe_setpoint(fname, sheet):
-    p = os.path.join(BASE, fname)
+    p = pp.recipe(fname)          # 输入/recipe/ 下解析（迁移后 BASE 下已无 recipe）
     r = pd.read_excel(p, sheet_name=sheet, usecols=["步号", "目标温度"])
     return dict(zip(r["步号"].astype(int), r["目标温度"].astype(float)))
 
@@ -809,7 +809,7 @@ def main():
         _log_last = int(proc["step"].max())
         run_meta[tag] = dict(label=label, log_last=_log_last,
                              recipe_last=max(sets.keys()),
-                             missing=missing_steps(os.path.join(BASE, rfile), rsheet,
+                             missing=missing_steps(pp.recipe(rfile), rsheet,
                                                    set(int(x) for x in proc["step"].unique()),
                                                    _log_last))
         diags[tag] = t_diag(proc)

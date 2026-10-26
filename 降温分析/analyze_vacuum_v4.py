@@ -781,7 +781,7 @@ def load_recipe_last(tag):
     """recipe 最后一步（含结束标记步）。recipe 文件名单一来源 = analyze_v5.RUNS，避免再维护一份映射。"""
     import analyze_v5 as _v5
     rfile = {t: r for t, _, r, *_ in _v5.RUNS}[tag]
-    d = pd.read_excel(os.path.join(BASE, rfile), usecols=["步号"])
+    d = pd.read_excel(pp.recipe(rfile), usecols=["步号"])
     return int(d["步号"].astype(int).max())
 
 
@@ -789,7 +789,7 @@ def load_recipe_meta(tag):
     """recipe 文件路径与首个 sheet 名（用于缺失步检测；文件名映射同 load_recipe_last）。"""
     import analyze_v5 as _v5
     rfile = {t: r for t, _, r, *_ in _v5.RUNS}[tag]
-    p = os.path.join(BASE, rfile)
+    p = pp.recipe(rfile)
     return p, pd.ExcelFile(p).sheet_names[0]
 
 

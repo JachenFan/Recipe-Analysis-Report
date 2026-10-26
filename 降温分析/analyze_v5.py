@@ -141,7 +141,8 @@ def load_recipe(path, sheet=None):
     sheet=None 时自动取第一个含『步号』列的工作表——recipe 文件名与 sheet 名常不一致
     （29C261016.xlsx 的 sheet 名是 29C260815），因此不能按文件名猜。
     """
-    p = str(path) if os.path.isabs(str(path)) else os.path.join(BASE, path)
+    # recipe 文件可能在 输入/recipe/（2026-10-23 目录迁移后 BASE 下已无副本）
+    p = pp.recipe(str(path)) if not os.path.isabs(str(path)) else str(path)
     if sheet is None:
         xl = pd.ExcelFile(p)
         sheet = xl.sheet_names[0]
@@ -294,7 +295,7 @@ def load_measured(tag, d3, d4):
     """读取需求3/需求4 的实测判型与推荐速率（单一事实来源）"""
     m = {}
     for d, key, tag_name in [(d3, "T", "温度"), (d4, "V", "真空度")]:
-        p = os.path.join(BASE, d, "_stats.csv")
+        p = pp.out(d, "_stats.csv")     # 需求N 产物已迁入 输出/
         s = pd.read_csv(p, encoding="utf-8-sig")
         s = s[s["炉次"] == tag]
         for _, r in s.iterrows():
@@ -1309,12 +1310,12 @@ def main():
     # 明细：合并需求3(温度) + 需求4(真空)
     det = []
     for tag, label, rfile, d3, d4 in RUNS:
-        a = pd.read_excel(os.path.join(BASE, d3, f"{d3}.xlsx"), sheet_name="分段速率明细")
+        a = pd.read_excel(pp.out(d3, f"{d3}.xlsx"), sheet_name="分段速率明细")
         a = a[a["炉次"] == tag].copy()
         if "起温" in a.columns:
             a = a.rename(columns={"起温": "起值", "段温变": "段变化"})
         a["变量"] = "温度"; a["速率单位"] = "℃/min"
-        b = pd.read_excel(os.path.join(BASE, d4, f"{d4}.xlsx"), sheet_name="分段速率明细")
+        b = pd.read_excel(pp.out(d4, f"{d4}.xlsx"), sheet_name="分段速率明细")
         b = b[b["炉次"] == tag].copy()
         b["变量"] = "真空度"; b["速率单位"] = "Pa/min"
         det.append(pd.concat([a, b], ignore_index=True))
