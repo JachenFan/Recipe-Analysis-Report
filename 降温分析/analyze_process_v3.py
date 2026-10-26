@@ -804,6 +804,8 @@ def main():
     run_meta = {}      # tag -> dict(label, log_last, recipe_last)（说明页『缺失情况』按实际数据生成）
     diags = {}         # tag -> 需求7 源系统偏差诊断（说明页按实际数据生成）
     for tag, label, src, rfile, rsheet in RUNS:
+        hold = phases.hold_of(tag)               # 涂层中 = 本批 recipe 时长最长的一步
+        phases.set_active(hold, tag)
         proc, dropped = load_process(tag)
         sets = recipe_setpoint(rfile, rsheet)
         _log_last = int(proc["step"].max())
