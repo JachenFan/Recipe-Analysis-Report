@@ -73,6 +73,12 @@ R_TMODE, R_TSP, R_PMAX, R_PMIN = "温度模式", "目标温度", "功率上限",
 R_PMODE, R_VMAX, R_VMIN = "压力模式", "蝶阀开度上限", "蝶阀开度下限"
 R_PSP_COL, R_END = "目标压力", "结束位"
 
+# 进气参数（recipe 中的质量流量通道，单位 L/min）
+# ⚠️ recipe 里另有『硅A2』一列，用户 2026-10-27 明确「硅A2 为无用参数，排除」——
+#    它不是进气通道，不要顺手加进来；也不要只按"含气体名"的通配去抓列。
+R_GAS = ("氢A1", "氢B", "氢F", "氮C", "氮G")
+R_GAS_START = "氢A1"          # 「涂层中」起点判据：从最长步向前回溯，氢A1 由 0 开始进气的那一步
+
 MODE_T = {0: "—(占位)", 1: "①功率模式", 2: "②温度模式", 3: "③线性模式"}
 MODE_P = {0: "—(占位)", 1: "①开度模式", 2: "②压力模式"}
 
@@ -167,6 +173,8 @@ def load_recipe(path, sheet=None):
             压力模式=int(r.get(R_PMODE, 0) or 0), 目标压力=float(r.get(R_PSP_COL, 0) or 0),
             蝶阀开度上限=float(r.get(R_VMAX, 0) or 0), 蝶阀开度下限=float(r.get(R_VMIN, 0) or 0),
             结束位=int(r.get(R_END, 0) or 0),
+            # 进气参数：顶部参数表「设定」段展示，也是 phases 判「涂层中」起点的依据
+            **{g: float(r.get(g, 0) or 0) for g in R_GAS},
         )
     return rec
 
@@ -1243,8 +1251,8 @@ def main():
     diags = {}             # tag -> 需求7 源系统偏差诊断（说明页按实际数据生成）
     for tag, label, rfile, d3, d4 in RUNS:
         recipe = load_recipe(rfile)
-        hold = phases.hold_step(recipe)          # 涂层中 = 时长最长的一步（本批现算，不写死）
-        phases.set_active(hold, tag)
+        h0, hold = phases.hold_span(recipe)      # 涂层中 = [进气起步, 时长最长的一步]（本批现算，不写死）
+        phases.set_active(hold, tag, h0)
         proc, dropped = load_log(tag, hold=hold)
         meas = load_measured(tag, d3, d4)
         st = analyze_run(tag, label, recipe, proc, meas)

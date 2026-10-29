@@ -39,6 +39,14 @@
    （否则按 recipe 核对会跳号），判型/速率/达标/过程一律不产出，结论区只留一句"滞后、不分析"。
    依据：6 批 63 个这样的步全是 1365℃ 恒温段的 1min 微调或 0min 占位，温度变化 <1℃ 而噪声 ±0.5℃；
    时长分布本身也断开（<2min 63 步 / 2–5min 0 步 / ≥5min 206 步），定 2min 不会误伤正常步。
+13. **进气参数 + 涂层中区间（2026-10-27，用户需求11）**：顶部参数表「设定」段追加 recipe 的
+   氢A1 / 氢B / 氢F / 氮C / 氮G（L/min，**硅A2 无用、排除**）；「涂层中」由单步改为闭区间
+   `[氢A1 开始进气的那一步, recipe 时长最长的一步]`（29C 六批 = 步21–25，25C261007 = 步28–32）。
+14. **主控线画 log 原始值（2026-10-29 用户反馈）**：图上的「主控温度」改用 `主控温度_原始`，
+   不再用需求7/方案C 的 T1/T2 拼接值替代——否则源主控在 T1 饱和段的冻结/通道切换
+   （如 29C260926 步12 的 1100.96→1344.89）会被画成一段线性上升，和 log 对不上。
+   拼接值仍用于速率、终点与判定；图下注释给出拼接值区间。0/负值缺测哨兵一律断线，
+   不再让单点 0 把曲线拉到 0℃。
 
 用法
 ----
@@ -97,6 +105,9 @@ COL = dict(
     GRID="#dee2e6", INK="#1f2937", SUB="#6b7280", BG="#f3f4f6",
 )
 PHASE_COL = {phases.PRE: "#f76707", phases.HOLD: "#1864ab", phases.POST: "#2f9e44"}
+
+# 顶部参数表「设定」段的进气参数（与 analyze_v5.R_GAS 同一清单；硅A2 无用，排除）
+GAS = ("氢A1", "氢B", "氢F", "氮C", "氮G")
 
 # 判型配色（与 analyze_v6.plot_rate_summary 的 colmap 一致，单一来源）
 TYPE_COL = {
@@ -414,7 +425,53 @@ def _fit_segments(d: pd.DataFrame, tag: str, lab: str, mode: str):
     return segs[:14]
 
 
-def build_step(proc: pd.DataFrame, st: pd.Series, t3, t4, tag: str) -> dict:
+def _num(v):
+    """转 float；None/NaN/非数值一律返回 None（供参数表按「—」占位）。"""
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return None
+    return None if x != x else x
+
+
+def _gas_of(st, gas) -> dict:
+    """该步的进气设定值（L/min）：氢A1 / 氢B / 氢F / 氮C / 氮G。
+
+    取值优先级 recipe 现算 > 步表自带列（需求6『分步速率与结论』将来带这几列时可直接用）；
+    硅A2 不取——用户 2026-10-27 明确「硅A2 为无用参数，排除」。
+    """
+    out = {}
+    for g in GAS:
+        v = (gas or {}).get(g)
+        if v is None:
+            v = st.get(g) if hasattr(st, "get") else None
+        out[g] = _num(v)
+    return out
+
+
+def _recipe_quiet(tag: str) -> dict:
+    """按批次号读 recipe（只为取进气参数与「涂层中」起点）；失败返回 {}，不打断出图。
+
+    tag 可以是 run1…run6，也可以是炉次号（29C260916）；新批次按 `{批次}-recipe.xlsx` 兜底。
+    """
+    try:
+        import analyze_v5 as v5
+        p = ""
+        for t, label, rfile, *_ in v5.RUNS:
+            if tag in (t, label):
+                p = pp.recipe(rfile)
+                break
+        if not p or not os.path.exists(p):
+            p = pp.recipe(f"{tag}-recipe.xlsx")
+        if p and os.path.exists(p):
+            return v5.load_recipe(p)
+    except Exception as e:                        # 缺 recipe 只影响进气列与区间起点
+        print(f"  ! 读 recipe 失败（进气参数留空、阶段按单步口径）：{e}")
+    return {}
+
+
+def build_step(proc: pd.DataFrame, st: pd.Series, t3, t4, tag: str,
+               gas: dict | None = None) -> dict:
     n = int(st["_n"])
     p = int(st["_p"])
     lab = str(st["步号"])
@@ -429,6 +486,14 @@ def build_step(proc: pd.DataFrame, st: pd.Series, t3, t4, tag: str) -> dict:
     t = np.nan_to_num(t, nan=0.0)
 
     T = pd.to_numeric(g["主控温度"], errors="coerce").to_numpy(float)
+    # 图中主控线画 log 原始值『主控温度_原始』：需求7/方案C 的拼接值只用于速率与判定，
+    # 不能拿它替代源主控——否则源主控在 T1 饱和段的冻结/跳变在图上会变成一段"线性上升"。
+    Traw = pd.to_numeric(
+        g["主控温度_原始"] if "主控温度_原始" in g.columns else g["主控温度"],
+        errors="coerce").to_numpy(float)
+    raw_bad = int(np.sum(np.isfinite(Traw) & (Traw <= 0)))  # 0/负值 = 缺测哨兵
+    Traw = np.where(np.isfinite(Traw) & (Traw > 0), Traw, np.nan)
+    T = np.where(np.isfinite(T) & (T > 0), T, np.nan)      # 修正值同样清洗，供量程/注释
     T1 = pd.to_numeric(g["T1温度"], errors="coerce").to_numpy(float)
     T2 = pd.to_numeric(g["T2温度"], errors="coerce").to_numpy(float)
     T2 = np.where(T2 > 0, T2, np.nan)                      # 低温段 T2 读 0 -> 缺测
@@ -439,8 +504,19 @@ def build_step(proc: pd.DataFrame, st: pd.Series, t3, t4, tag: str) -> dict:
     V = np.where(V > 0, V, np.nan)                          # 对数轴：<=0 视为缺测
     MV = pd.to_numeric(g["数控蝶阀开度反馈"], errors="coerce").to_numpy(float)
 
-    i_tp = decimate(t, [T, P])
+    # 主控线是 Traw，抽稀必须同时保 Traw 与修正值的极值；修正值只用于量程与注释
+    i_tp = decimate(t, [T, Traw, P])
     i_vm = decimate(t, [V, MV])
+
+    okT = np.isfinite(T)
+    tcorr0 = float(T[okT][0]) if okT.any() else None
+    tcorr1 = float(T[okT][-1]) if okT.any() else None
+    both = np.isfinite(T) & np.isfinite(Traw)
+    tcorr = bool(both.any() and np.nanmax(np.abs(T[both] - Traw[both])) > 30)
+    # 只统计 >30℃/min 的跳变：跨 20 min 的正常升温 38℃ 不算跳变，数据断档也不算
+    _dt = np.diff(t)
+    _rate = np.abs(np.diff(Traw)) / np.maximum(_dt, 1e-6)
+    raw_jumps = int(np.nansum(_rate > PM_RATE_MAX))
 
     tgt_T = float(st["目标温度"]) if pd.notna(st["目标温度"]) else None
     tgt_P = float(st["目标压力"]) if pd.notna(st["目标压力"]) else None
@@ -526,16 +602,20 @@ def build_step(proc: pd.DataFrame, st: pd.Series, t3, t4, tag: str) -> dict:
         vtip=_verdict_tip(tok, pok, alg),
         **pmet,                                      # pst/pamp/pmin/pfrac/pt0/pt1/pnote
         tgtT=tgt_T, tgtP=tgt_P, pmax=pmax, pmin=pmin, vmax=vmax, vmin=vmin,
+        gas=_gas_of(st, gas),                        # 进气参数（L/min），顶部参数表「设定」段
         ve=round(float(st["真空_结束"]), 1) if pd.notna(st.get("真空_结束")) else None,
         mvmean=round(float(st["蝶阀_均值"]), 2) if pd.notna(st.get("蝶阀_均值")) else None,
         txt=([short_note] if short else parts),
-        tp=dict(t=_clean(t[i_tp]), T=_clean(T[i_tp]), T1=_clean(T1[i_tp]),
-                T2=_clean(T2[i_tp]), P=_clean(P[i_tp]),
+        tcorr=tcorr, tcorr0=(round(tcorr0, 1) if tcorr0 is not None else None),
+        tcorr1=(round(tcorr1, 1) if tcorr1 is not None else None),
+        raw_bad=raw_bad, raw_jumps=raw_jumps,
+        tp=dict(t=_clean(t[i_tp]), Traw=_clean(Traw[i_tp]), T=_clean(T[i_tp]),
+                T1=_clean(T1[i_tp]), T2=_clean(T2[i_tp]), P=_clean(P[i_tp]),
                 fit=_fit_segments(t3, tag, lab, "T")),
         vm=dict(t=_clean(t[i_vm]), V=_clean(V[i_vm]), MV=_clean(MV[i_vm]),
                 fit=_fit_segments(t4, tag, lab, "V")),
         # 长步（原始点多）额外给一份桶均值序列，供"平滑看趋势"开关使用
-        tp_s=_sm(t, ["T", "P"], T, P),
+        tp_s=_sm(t, ["Traw", "P"], Traw, P),
         vm_s=_sm(t, ["V", "MV"], V, MV),
     )
 
@@ -553,6 +633,12 @@ def build_overview(proc: pd.DataFrame, steps: list[dict], plab: dict | None = No
     t0 = proc["时间"].min()
     tt = (proc["时间"] - t0).dt.total_seconds().to_numpy(float) / 3600.0
     T = pd.to_numeric(proc["主控温度"], errors="coerce").to_numpy(float)
+    Traw = pd.to_numeric(
+        proc["主控温度_原始"] if "主控温度_原始" in proc.columns else proc["主控温度"],
+        errors="coerce").to_numpy(float)
+    raw_bad = int(np.sum(np.isfinite(Traw) & (Traw <= 0)))
+    Traw = np.where(np.isfinite(Traw) & (Traw > 0), Traw, np.nan)
+    T = np.where(np.isfinite(T) & (T > 0), T, np.nan)
     T1 = pd.to_numeric(proc["T1温度"], errors="coerce").to_numpy(float)
     T2 = pd.to_numeric(proc["T2温度"], errors="coerce").to_numpy(float)
     T2 = np.where(T2 > 0, T2, np.nan)
@@ -561,7 +647,9 @@ def build_overview(proc: pd.DataFrame, steps: list[dict], plab: dict | None = No
     V = np.where(V > 0, V, np.nan)
     MV = pd.to_numeric(proc["数控蝶阀开度反馈"], errors="coerce").to_numpy(float)
 
-    i_tp = decimate(tt, [T, P], n_max=OV_MAX)
+    both = np.isfinite(T) & np.isfinite(Traw)
+    tcorr = bool(both.any() and np.nanmax(np.abs(T[both] - Traw[both])) > 30)
+    i_tp = decimate(tt, [T, Traw, P], n_max=OV_MAX)
     i_vm = decimate(tt, [V, MV], n_max=OV_MAX)
 
     lut = {s["id"]: s for s in steps}
@@ -632,7 +720,8 @@ def build_overview(proc: pd.DataFrame, steps: list[dict], plab: dict | None = No
          "#e03131" if v_bad else "#2f9e44"],
         ["全程时长", f"{dur:.1f} h", f"{dur / 24:.1f} 天"],
         ["最高主控温度", f"{Tmax:.1f} ℃", f"出现在 {t_at_max:.1f} h"],
-        ["涂层中时长", f"{hold_h:.1f} h", f"占全程 {hold_h / dur:.0%}" if dur else "—"],
+        ["涂层中时长", f"{hold_h:.1f} h",
+         (f"{len(by_ph[phases.HOLD])} 步 · 占全程 {hold_h / dur:.0%}" if dur else "—")],
         [f"{L(phases.POST)}", f"{cool_h:.1f} h", (f"平均 {cool_txt}" if cool_rate else "—")],
         ["真空范围", f"{vv.min():,.0f} ~ {vv.max():,.0f} Pa" if vv.size else "—",
          f"蝶阀 {int(round(mv.min()))}~{int(round(mv.max()))}°" if mv.size else "—"],
@@ -644,9 +733,15 @@ def build_overview(proc: pd.DataFrame, steps: list[dict], plab: dict | None = No
         if s["ftype"]:
             type_cnt[s["ftype"]] = type_cnt.get(s["ftype"], 0) + 1
     top = sorted(type_cnt.items(), key=lambda kv: -kv[1])[:3]
-    hold_txt = "、".join(
-        f"步{s['id']} {s['T0']:.1f}→{s['T1e']:.1f}℃" for s in by_ph[phases.HOLD]
-        if s.get("T0") is not None and s.get("T1e") is not None) or "—"
+    # 涂层中是区间（进气起步 → 最长步），步数多时按区间紧凑表述，避免 5 段温度串成一句
+    hold_pts = [s for s in by_ph[phases.HOLD]
+                if s.get("T0") is not None and s.get("T1e") is not None]
+    if len(hold_pts) > 2:
+        hold_txt = (f"步{hold_pts[0]['id']}–{hold_pts[-1]['id']}"
+                    f"（{hold_pts[0]['T0']:.1f}→{hold_pts[-1]['T1e']:.1f}℃）")
+    else:
+        hold_txt = "、".join(f"步{s['id']} {s['T0']:.1f}→{s['T1e']:.1f}℃"
+                            for s in hold_pts) or "—"
     txt = [
         f"全程 {len(steps)} 个步次、{dur:.1f} h（{dur / 24:.1f} 天）；{L(phases.PRE)} "
         f"{len(by_ph[phases.PRE])} 步、{L(phases.HOLD)} {len(by_ph[phases.HOLD])} 步、"
@@ -662,8 +757,9 @@ def build_overview(proc: pd.DataFrame, steps: list[dict], plab: dict | None = No
 
     return dict(
         dur=round(dur, 2),
-        t=_clean(tt[i_tp]), T=_clean(T[i_tp]), T1=_clean(T1[i_tp]), T2=_clean(T2[i_tp]),
-        P=_clean(P[i_tp]),
+        t=_clean(tt[i_tp]), Traw=_clean(Traw[i_tp]), T=_clean(T[i_tp]),
+        T1=_clean(T1[i_tp]), T2=_clean(T2[i_tp]),
+        P=_clean(P[i_tp]), tcorr=tcorr, raw_bad=raw_bad,
         tv=_clean(tt[i_vm]), V=_clean(V[i_vm]), MV=_clean(MV[i_vm]),
         xt=xt, yt=yt, xp1=xp1, yp1=yp1, xp2=xp2, yp2=yp2,
         xv=xv, yv=yv, xmv=xmv, ymv=ymv,
@@ -677,27 +773,34 @@ def build_overview(proc: pd.DataFrame, steps: list[dict], plab: dict | None = No
 # ------------------------------------------------------------------ 主流程
 def build_report(st: pd.DataFrame, proc: pd.DataFrame, segT: pd.DataFrame, segV: pd.DataFrame,
                  batch: str, note: str = "", tag: str = "", outdir: str | None = None,
-                 n_steps_recipe: int | None = None, hold: int | None = None) -> str:
+                 n_steps_recipe: int | None = None, hold: int | None = None,
+                 recipe: dict | None = None) -> str:
     """把「步表 + 过程数据 + 拟合段」装配成单文件 HTML，返回路径。
 
     入参全部是 DataFrame，因此有两条来源完全兼容：
       · 既有产物（需求6 `_step_table.csv` + 需求3/4『分段速率明细』）—— `main()` 的 tag 模式；
       · 用户任选 recipe+log 时现算的结果（`batch_pipeline.analyze_batch`）—— `--recipe/--log` 模式。
+
+    `recipe` 用于两件事：① 顶部参数表的进气参数；② 「涂层中」区间的起点。
+    缺省时按批次号自己读（`_recipe_quiet`），读不到就退化为「末步单步」的老口径。
     """
     if "_n" not in st.columns:
         st = st.copy()
         st["_n"] = st["步号"].astype(str).str.split("(").str[0].astype(int)
         st["_p"] = st["步号"].astype(str).str.extract(r"\((\d+)\)").fillna(1).astype(int)
 
-    # 阶段划分：涂层中 = 该批 recipe 时长最长的一步（29C 恰为步25，25C261007 为步32）
-    if hold is None:
-        hold = phases.hold_of(tag or batch)
-    phases.set_active(int(hold), tag or batch)
+    # 阶段划分：涂层中 = [氢A1 开始进气的那一步, recipe 时长最长的一步]
+    # （29C 六批 = 步21–25；25C261007 = 步28–32，见 phases.py 与技能 R13）
+    end = int(hold) if hold is not None else phases.hold_of(tag or batch)
+    rec = recipe if recipe is not None else _recipe_quiet(tag or batch)
+    start = phases.hold_start(rec, end) if rec else end
+    phases.set_active(end, tag or batch, start)
 
     steps = []
     for _, row in st.sort_values(["_n", "_p"]).iterrows():
         try:
-            steps.append(build_step(proc, row, segT, segV, tag or batch))
+            steps.append(build_step(proc, row, segT, segV, tag or batch,
+                                    gas=(rec or {}).get(int(row["_n"]))))
         except Exception as e:                     # 单步失败不影响整体
             print(f"  ! 步{row['步号']} 跳过：{e}")
 
@@ -706,7 +809,8 @@ def build_report(st: pd.DataFrame, proc: pd.DataFrame, segT: pd.DataFrame, segV:
     for s in steps:
         s["plab"] = plab.get(s["phase"], s["phase"])
     ov = build_overview(proc, steps, plab)
-    data = dict(batch=batch, note=note, tag=tag or batch, hold=int(hold),
+    data = dict(batch=batch, note=note, tag=tag or batch,
+                hold=int(end), span=[int(start), int(end)], gas=list(GAS),
                 plab=plab, steps=steps, ov=ov)
     payload = json.dumps(data, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
 
@@ -890,12 +994,14 @@ TEMPLATE = r"""<!DOCTYPE html>
   .vitem b{font-weight:700}
   .vitem.none{color:#adb5bd}
   .kvgrp{display:grid;grid-template-columns:46px minmax(0,1fr);align-items:start;
-         padding:6px 14px 7px 0;border-bottom:1px solid #f1f3f5}
+         padding:4px 14px 5px 0;border-bottom:1px solid #f1f3f5}
   .kvgrp:last-child{border-bottom:0}
   .kvgrp>.h{padding:2px 0 0 11px;font-size:11.5px;font-weight:600;letter-spacing:.4px;color:#6b7280}
   .kvgrp>.h.set{color:#1864ab}
-  .kv-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:3px 20px}
-  .kv{font-size:12.5px;color:#1f2937;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  /* 3 列固定：设定段按「温度域 3 项 / 压力域 3 项 / 进气 5 项」自然成行，
+     不要把列数提到 4 —— 会把「压力控制」与温度域参数挤到同一行，域分组就乱了 */
+  .kv-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:2px 20px}
+  .kv{font-size:12.2px;line-height:1.5;color:#1f2937;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .kv .k{font-size:12px;color:#6b7280;margin-right:7px}
   .kv .v{font-weight:700}
   .kv .v.warn{color:#e8590c}
@@ -915,9 +1021,14 @@ TEMPLATE = r"""<!DOCTYPE html>
   .chartbox{padding:6px 8px 2px;min-width:0}
   .chartbox h3{margin:4px 6px 0;font-size:13.5px;font-weight:700}
   .chartbox h3 span{font-weight:400;color:var(--sub);font-size:12px;margin-left:6px}
-  .plot{width:100%;height:clamp(340px,calc(100vh - 455px),700px)}
+  /* 分步页图高：参数表「设定」段含 5 项进气参数（3 列 → 4 行），
+     可用高度扣减 455 → 575px（实测 1080 视口下 scrollHeight 恰等于视口，一屏装完） */
+  .plot{width:100%;height:clamp(310px,calc(100vh - 575px),700px)}
   .plot.ovmain{height:clamp(300px,calc(100vh - 700px),430px)}
-  .plot.ovsub{height:clamp(260px,calc(100vh - 780px),340px)}
+  /* 总览页「真空—蝶阀」「各步升降温速率」**各占一整行**（2026-10-27 用户要求分行）：
+     整宽后横向更舒展，柱状图 47 根柱不再挤在 ~900px 里；高度按视口 34% 给，
+     保证 1080p 下单图 340~370px、不被压扁（总览页整体改为纵向滚动） */
+  .plot.ovrow{height:clamp(280px,34vh,420px)}
   .hint{margin:0 8px 6px;font-size:11.5px;color:#868e96}
 
   .analysis{padding:10px 16px 14px}
@@ -950,7 +1061,7 @@ TEMPLATE = r"""<!DOCTYPE html>
     .charts{grid-template-columns:1fr}
     /* 参数表 3 列 → 2 列（每格仍装得下「标签 值」） */
     .kv-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:3px 14px}
-    .plot,.plot.ovmain,.plot.ovsub{height:clamp(300px,42vh,400px)}
+    .plot,.plot.ovmain,.plot.ovrow{height:clamp(300px,42vh,400px)}
     /* KPI 用定列数，避免 5+1 那种参差不齐的换行 */
     .kpis{grid-template-columns:repeat(3,1fr)}
   }
@@ -958,7 +1069,7 @@ TEMPLATE = r"""<!DOCTYPE html>
     header h1{font-size:15px}
     .kpis{grid-template-columns:repeat(2,1fr)}
     .kpi .v{font-size:17px}
-    .plot,.plot.ovmain,.plot.ovsub{height:clamp(260px,38vh,340px)}
+    .plot,.plot.ovmain,.plot.ovrow{height:clamp(260px,38vh,340px)}
     /* ⚠️ 这里仍保持两列：单列会把 12 项排成 12 行（620px 实测），两列每列 ~285px 装得下 */
     .kv-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:3px 12px}
     .kvgrp{grid-template-columns:40px minmax(0,1fr);padding-right:12px}
@@ -996,15 +1107,13 @@ TEMPLATE = r"""<!DOCTYPE html>
         <div id="ovTP" class="plot ovmain"></div>
         <p class="hint" id="ovTpHint" style="display:none"></p>
       </div>
-      <div class="charts">
-        <div class="card chartbox">
-          <h3>全程 炉内真空 — 蝶阀开度<span>左轴 Pa / 右轴 °</span></h3>
-          <div id="ovVM" class="plot ovsub"></div>
-        </div>
-        <div class="card chartbox">
-          <h3>各步升降温速率<span>正＝升温 / 负＝降温　柱色＝实测曲线类型</span></h3>
-          <div id="ovRate" class="plot ovsub"></div>
-        </div>
+      <div class="card chartbox">
+        <h3>全程 炉内真空 — 蝶阀开度<span>左轴 Pa / 右轴 °</span></h3>
+        <div id="ovVM" class="plot ovrow"></div>
+      </div>
+      <div class="card chartbox">
+        <h3>各步升降温速率<span>正＝升温 / 负＝降温　柱色＝实测曲线类型　点击图例可隐藏该类型</span></h3>
+        <div id="ovRate" class="plot ovrow"></div>
       </div>
       <div class="card analysis">
         <h3>总览要点</h3>
@@ -1059,6 +1168,7 @@ TEMPLATE = r"""<!DOCTYPE html>
   const PH_ORDER = ["涂层前","涂层中","涂层后"];
   const PHC = { "涂层前":"#f76707", "涂层中":"#1864ab", "涂层后":"#2f9e44" };
   const PLAB = DATA.plab || {};         // {涂层前:'涂层前·升温', …} 方向由实测温度净变化判定
+  const GASN = DATA.gas || [];          // 进气参数清单（氢A1/氢B/氢F/氮C/氮G；硅A2 无用，排除）
 
   /* ---------- 左侧步号（含步级判定标注） ---------- */
   // 标注只表达"这一步有没有达到 recipe 设定"，判定值本身来自需求6 产物（不在此重算）
@@ -1181,7 +1291,7 @@ TEMPLATE = r"""<!DOCTYPE html>
 
     /* --- 温度 — 功率 --- */
     const trT = [
-      { x: ov.t, y: ov.T, name: "主控温度", type: "scatter", mode: "lines",
+      { x: ov.t, y: ov.Traw, name: "主控温度（log 原始）", type: "scatter", mode: "lines",
         line: { color: "#1864ab", width: 1.9 }, yaxis: "y",
         hovertemplate: "主控 %{y:.1f} ℃<extra></extra>" },
       { x: ov.t, y: ov.T1, name: "T1温度", type: "scatter", mode: "lines",
@@ -1203,7 +1313,7 @@ TEMPLATE = r"""<!DOCTYPE html>
         line: { color: "#846358", width: 1.1, dash: "dot" }, yaxis: "y2", connectgaps: false,
         hovertemplate: "下限 %{y:.0f} kW<extra></extra>" }
     ];
-    const loT = range(fin(ov.T).concat(fin(ov.yt)), 0.06);
+    const loT = range(fin(ov.Traw).concat(fin(ov.T)).concat(fin(ov.yt)), 0.06);
     const loP = range(fin(ov.P).concat(fin(ov.yp1)), 0.06);
     Plotly.react("ovTP", trT, Object.assign({}, BASE, {
       shapes: shapes, annotations: anns,
@@ -1253,45 +1363,79 @@ TEMPLATE = r"""<!DOCTYPE html>
                                         range: [loM, hiM], showgrid: false })
     }), CONF);
 
-    /* --- 各步速率（与 PPT 总览第3页一致：只画温度推荐速率，柱色＝实测判型） --- */
+    /* --- 各步速率（与 PPT 总览第3页一致：只画温度推荐速率，柱色＝实测判型） ---
+       ⚠️ 必须**按判型拆成多个 trace**，不能用单 trace + marker.color 数组：
+       后者图例里的"判型色块"只能是 x/y 全 null 的占位 trace，点击只切换那个空 trace，
+       柱子颜色纹丝不动 —— 用户实测「不同图例点击后无显隐效果」。
+       拆开后每个 trace 的 x 只含该类判型的步，类别顺序由 categoryarray 固定（否则
+       各 trace 的类别集合不同会让 x 轴重排）。短步/无判型（ftype 为空、rate 为 null）不画柱。 */
     const labs = steps.map(s => s.id);
-    const colOf = t => { for (let i = 0; i < ov.types.length; i++) { if (ov.types[i].k === t) return ov.types[i].c; } return "#adb5bd"; };
-    const trR = [
-      { x: labs, y: steps.map(s => s.rate), type: "bar", name: "温度速率 (℃/min)",
-        customdata: steps.map(s => (s.ftype || "—")),
-        marker: { color: steps.map(s => colOf(s.ftype)) }, width: 0.74,
-        hovertemplate: "步%{x}　%{y:.3f} ℃/min<br>%{customdata}<extra></extra>" }
-    ];
-    // 判型图例（用空 trace 只借图例色块）
-    ov.types.forEach(t => trR.push({ x: [null], y: [null], type: "bar", name: t.k,
-      marker: { color: t.c }, hoverinfo: "skip" }));
+    // 柱顶数字：0（|v|<0.005）不标——柱高本身就是 0，标上去只会沿零线叠成一排"0.00"
+    const rfmt = v => (v == null || Math.abs(v) < 0.005) ? "" : (v > 0 ? "+" : "") + v.toFixed(2);
+    const trR = ov.types.map(t => {
+      const sub = steps.filter(s => s.ftype === t.k && s.rate != null);
+      return {
+        x: sub.map(s => s.id),
+        y: sub.map(s => s.rate),
+        text: sub.map(s => rfmt(s.rate)),
+        textposition: "outside", textfont: { size: 8.5, color: "#495057" },
+        cliponaxis: false,
+        type: "bar", name: t.k,
+        marker: { color: t.c }, width: 0.74,
+        hovertemplate: "步%{x}　%{y:.3f} ℃/min<br>" + t.k + "<extra></extra>"
+      };
+    }).filter(tr => tr.x.length);          // 该判型一步都没有就不出图例项
+    // 兜底：判型为空但仍有速率（理论上不会出现）的步，单列一个灰色 trace，避免静默丢数据
+    const orphans = steps.filter(s => !s.ftype && s.rate != null);
+    if (orphans.length) {
+      trR.push({ x: orphans.map(s => s.id), y: orphans.map(s => s.rate),
+        text: orphans.map(s => rfmt(s.rate)),
+        textposition: "outside", textfont: { size: 8.5, color: "#495057" },
+        cliponaxis: false, type: "bar", name: "未判型",
+        marker: { color: "#adb5bd" }, width: 0.74,
+        hovertemplate: "步%{x}　%{y:.3f} ℃/min<extra></extra>" });
+    }
     const rr = fin(steps.map(s => s.rate));
-    // 步次多时（>30）隔几步标一个刻度，否则 47 个标签会糊成一条黑边
-    const kLab = Math.max(1, Math.ceil(labs.length / 24));
-    const tickvals = labs.filter((v, i) => i % kLab === 0);
+    // 横轴刻度：**步长恒为 1**，每个步号都标（用户 2026-10-27 要求）。
+    // ⚠️ 不能按数组索引取（i % k === 0）：labs 里混着重复 pass 的 "13(2)"，它占掉一个索引位，
+    // 会把 "14" 顶成奇数位 → 实测出现 "…11 13 14 16…"，13→14 差 1、其余差 2 的错序。
+    // 改为按**步号数值**取，并让重复 pass 不参与刻度（它的柱仍在，只是不标轴）。
+    // >90 个步次才退化为 2（当前最多 47，永远走 1），避免极长 recipe 把标签糊成黑边。
+    const kLab = labs.filter(v => !/\(/.test(v)).length > 90 ? 2 : 1;
+    const tickvals = labs.filter(v => !/\(/.test(v) && (parseInt(v, 10) % kLab === 0));
+    // 柱顶数字会探出绘图区，纵轴上下各留 18% 且范围至少 ±0.05，避免 0 附近数字压线
+    let ylo = rr.length ? Math.min.apply(null, rr) : 0;
+    let yhi = rr.length ? Math.max.apply(null, rr) : 1;
+    const pad = Math.max(0.05, (yhi - ylo) * 0.18);
     Plotly.react("ovRate", trR, Object.assign({}, BASE, {
       margin: { l: 58, r: 26, t: 16, b: 96 },
       bargap: 0.25,
+      barmode: "group",
       showlegend: true,
       legend: { orientation: "h", y: -0.40, x: 0, font: { size: 10 } },
       xaxis: Object.assign({}, AXIS, { tickangle: -90, tickfont: { size: 9.5 },
                                        tickmode: "array", tickvals: tickvals,
+                                       categoryorder: "array", categoryarray: labs,
                                        title: { text: "步号", font: { size: 11 } } }),
       yaxis: Object.assign({}, AXIS, {
         title: { text: "温度速率 (℃/min)", font: { size: 11 } },
         zeroline: true, zerolinecolor: "#868e96", zerolinewidth: 1,
-        range: rr.length ? [Math.min.apply(null, rr) * 1.18, Math.max.apply(null, rr) * 1.18] : null })
+        range: rr.length ? [ylo - pad, yhi + pad] : null })
     }), CONF);
 
-    // 总览里的 T1/T2 若整条落在主控量程外，同样折叠（不遮挡主线）
-    const cT = range(fin(ov.T), 0) || [0, 1];
+    // 总览里的 T1/T2 若整条落在温度量程外，同样折叠（不遮挡主线）
+    const cT = range(fin(ov.Traw).concat(fin(ov.T)), 0) || [0, 1];
     const hide = [];
     if (median(ov.T1) != null && (median(ov.T1) < cT[0] || median(ov.T1) > cT[1])) hide.push("T1");
     if (median(ov.T2) != null && (median(ov.T2) < cT[0] || median(ov.T2) > cT[1])) hide.push("T2");
+    const msgs = [];
+    if (hide.length) msgs.push(hide.join("、") + "温度超出全程量程，已折叠");
+    if (ov.raw_bad) msgs.push("源主控含 " + ov.raw_bad + " 个 0 值缺测点，图中已断开");
+    if (ov.tcorr) msgs.push("主控线为 log 原始值；KPI、速率、判定按 T1/T2 修正值");
     const hint = document.getElementById("ovTpHint");
-    if (hide.length) {
+    if (msgs.length) {
       hint.style.display = "block";
-      hint.textContent = hide.join("、") + "温度超出全程量程，已折叠";
+      hint.textContent = msgs.join("；");
     } else { hint.style.display = "none"; }
     ovDrawn = true;
   }
@@ -1353,8 +1497,12 @@ TEMPLATE = r"""<!DOCTYPE html>
 
   function renderMeta(s){
     const phc = PHC[s.phase] || "#495057";
+    // 进气设定值：recipe 的 0 是"该步不进气"，按 — 显示（与其它缺项一致）
+    const gasOf = g => (s.gas || {})[g];
+    const gTxt = g => posv(gasOf(g)) ? gasOf(g).toFixed(0) + " L/min" : "—";
     // 设定段：recipe 要求的东西；缺项用 — 占位保持列对齐（表格里空着会错列）
-    const setHas = [s.tm > 0, posv(s.tgtT), posv(s.pmax), s.pm > 0, posv(s.tgtP), posv(s.vmax)].some(Boolean);
+    const setHas = [s.tm > 0, posv(s.tgtT), posv(s.pmax), s.pm > 0, posv(s.tgtP), posv(s.vmax)]
+      .concat(GASN.map(g => posv(gasOf(g)))).some(Boolean);
     const setRows = [
       kv("温度控制", s.tm > 0 ? modeTxt(s.tm, s.tmode) : "—", s.tm > 0 ? "" : "na"),
       kv("目标温度", posv(s.tgtT) ? s.tgtT.toFixed(0) + " ℃" : "—", posv(s.tgtT) ? "" : "na"),
@@ -1364,16 +1512,24 @@ TEMPLATE = r"""<!DOCTYPE html>
       kv("目标压力", posv(s.tgtP) ? s.tgtP.toFixed(0) + " Pa" : "—", posv(s.tgtP) ? "" : "na"),
       kv("蝶阀区间", posv(s.vmax) ? s.vmin.toFixed(0) + " ~ " + s.vmax.toFixed(0) + " °" : "—",
          posv(s.vmax) ? "" : "na")
-    ].join("");
+    ].concat(GASN.map(g =>
+      kv(g, gTxt(g), posv(gasOf(g)) ? "" : "na")
+    )).join("");
     // 实测段：温度/时长的偏差超容差才着色（正常时保持深灰，避免满屏颜色）
-    const tTip = s.tdev == null ? "" :
+    let tTip = s.tdev == null ? "" :
       "终点偏差 " + (s.tdev > 0 ? "+" : "") + s.tdev.toFixed(1) + " ℃ / 容差 ±" + s.ttol.toFixed(1) + " ℃";
+    // 步表端点 0.0 是源主控 0 值缺测哨兵（29C260821 步36/37 等），不是真实温度
+    if (s.raw_bad && ((s.T0 != null && s.T0 <= 0) || (s.T1e != null && s.T1e <= 0))) {
+      tTip = (tTip ? tTip + "；" : "") + "步表端点 0.0 为源主控缺测哨兵，图按有效点显示";
+    }
     const dTip = s.ddur == null ? "" : "偏差 " + (s.ddur > 0 ? "+" : "") + s.ddur.toFixed(1) + " %";
+    // 0/负值端点按缺测显示（源主控 0 值哨兵），避免表格里出现误导性的 "0.0 →"
+    const t0txt = (s.T0 == null || s.T0 <= 0) ? "—" : s.T0.toFixed(1);
+    const t1txt = (s.T1e == null || s.T1e <= 0) ? "—" : s.T1e.toFixed(1);
     const obsRows = [
       kv("时长", num(s.dur, 1) + " / " + (posv(s.rdur) ? s.rdur.toFixed(0) : "—") + " min",
          lvlDur(s.ddur), dTip),
-      kv("温度", s.T0 == null ? "—" : s.T0.toFixed(1) + " → " + s.T1e.toFixed(1) + " ℃",
-         lvlTol(s.tdev, s.ttol), tTip),
+      kv("温度", t0txt + " → " + t1txt + " ℃", lvlTol(s.tdev, s.ttol), tTip),
       kv("速率", s.rate == null ? "—" : (s.rate > 0 ? "+" : "") + s.rate.toFixed(3) + " ℃/min",
          s.rate == null ? "na" : ""),
       kv("判型", s.ftype || "—", s.ftype ? "" : "na"),
@@ -1405,10 +1561,14 @@ TEMPLATE = r"""<!DOCTYPE html>
   function drawTP(s){
     const d = s.tp, tr = [];
     const src = (smoothOn && s.tp_s) ? s.tp_s : d;   // 平滑视图只换主控/功率两条
-    tr.push({ x: src.t, y: src.T, name: "主控温度", type: "scatter", mode: "lines",
+    // 主控线画 log 原始值；T1/T2 拼接值只用于速率/判定，避免把源主控的
+    // 通道切换（如 29C260926 步12 的 1100.96→1344.89）画成一段线性上升。
+    const yMain = (src.Traw !== undefined) ? src.Traw : src.T;
+    tr.push({ x: src.t, y: yMain, name: "主控温度（log 原始）", type: "scatter", mode: "lines",
               line: { color: "#1864ab", width: 2.1 }, yaxis: "y",
               hovertemplate: "主控 %{y:.1f} ℃<extra></extra>" });
-    const cT = range(d.T, 0) || [0, 1];
+    // 量程同时含原始值与修正值：否则 T2 在 T1 饱和段会被当成"超量程"折叠
+    const cT = range(fin(d.Traw).concat(fin(d.T)), 0) || [0, 1];
     const far = v => { const m = median(v); return m != null && (m < cT[0] || m > cT[1]); };
     tr.push({ x: d.t, y: d.T1, name: "T1温度", type: "scatter", mode: "lines",
               line: { color: "#15aabf", width: 1.1, dash: "dash" }, yaxis: "y",
@@ -1433,7 +1593,8 @@ TEMPLATE = r"""<!DOCTYPE html>
               type: "scatter", mode: "lines", line: { color: "#846358", width: 1.3, dash: "dot" },
               yaxis: "y2", hovertemplate: "下限 %{y:.0f} kW<extra></extra>" });
 
-    const loT = range(d.T.concat(posv(s.tgtT) ? [s.tgtT] : []), 0.10);
+    const loT = range(fin(d.Traw).concat(fin(d.T))
+                      .concat(posv(s.tgtT) ? [s.tgtT] : []), 0.10);
     const loP = range(d.P.concat([s.pmax, s.pmin].filter(v => v != null && v > 0)), 0.10);
     const xMaxT = Math.max.apply(null, fin(d.t).concat([1]));
     // 被判为"过程逆反"的区间直接画在图上，判定有据可查（否则用户无法核对阈值）
@@ -1459,15 +1620,28 @@ TEMPLATE = r"""<!DOCTYPE html>
     const hidden = [];
     if (far(d.T1)) hidden.push("T1");
     if (far(d.T2)) hidden.push("T2");
-    const hint = document.getElementById("tpHint");
+    const msgs = [];
     if (hidden.length){
       // 只说明"为什么少了一条线"，一句话，不写操作手册
       const m1 = median(d.T1), m2 = median(d.T2);
-      hint.style.display = "block";
-      hint.textContent = hidden.join("、") + "温度超出本步量程，已折叠（" +
+      msgs.push(hidden.join("、") + "温度超出本步量程，已折叠（" +
         (hidden.indexOf("T1") >= 0 ? "T1 中位 " + fmt(m1, 1) + "℃" : "") +
         (hidden.length === 2 ? "，" : "") +
-        (hidden.indexOf("T2") >= 0 ? "T2 中位 " + fmt(m2, 1) + "℃" : "") + "）";
+        (hidden.indexOf("T2") >= 0 ? "T2 中位 " + fmt(m2, 1) + "℃" : "") + "）");
+    }
+    if (s.raw_bad) msgs.push("源主控含 " + s.raw_bad + " 个 0 值缺测点，图中已断开");
+    if (s.raw_jumps) msgs.push("源主控有 " + s.raw_jumps + " 处 >30℃/min 跳变，见上图");
+    if (s.tcorr) {
+      const rv = fin(d.Traw);
+      const rawTxt = rv.length ? "（" + fmt(rv[0], 1) + "→" + fmt(rv[rv.length - 1], 1) + "℃）" : "";
+      const corrTxt = (s.tcorr0 != null && s.tcorr1 != null)
+        ? "（" + fmt(s.tcorr0, 1) + "→" + fmt(s.tcorr1, 1) + "℃）" : "";
+      msgs.push("主控线为 log 原始值" + rawTxt + "；速率/判定按 T1/T2 修正值" + corrTxt);
+    }
+    const hint = document.getElementById("tpHint");
+    if (msgs.length){
+      hint.style.display = "block";
+      hint.textContent = msgs.join("；");
     } else {
       hint.style.display = "none";
     }

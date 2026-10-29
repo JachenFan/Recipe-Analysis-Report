@@ -797,8 +797,8 @@ def main():
     stats, segrows, mv_rows, figures, notes = [], [], [], [], []
     run_meta = {}      # tag -> dict(label, log_last, recipe_last, missing)（说明页按实际数据生成）
     for tag, label, src in RUNS:
-        hold = phases.hold_of(tag)               # 涂层中 = 本批 recipe 时长最长的一步
-        phases.set_active(hold, tag)
+        h0, hold = phases.span_of(tag)           # 涂层中 = [进气起步, 时长最长的一步]
+        phases.set_active(hold, tag, h0)
         proc, dropped = load_process(tag, hold=hold)
         S = global_scale(proc)
         _rp, _rs = load_recipe_meta(tag)

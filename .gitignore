@@ -20,6 +20,7 @@
 !降温分析/recipe_meta.py
 !降温分析/batch_pipeline.py
 !降温分析/make_html_report.py
+!降温分析/check_terms.py
 
 # 通用缓存与编辑器产物
 **/__pycache__/

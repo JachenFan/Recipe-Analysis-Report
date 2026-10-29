@@ -240,7 +240,8 @@ def analyze_batch(proc: pd.DataFrame, recipe: dict, tag: str, label: str = "",
     判型/速率回填进 `meas` 后交给 v5.analyze_run()，得到与需求6『分步速率与结论』
     同字段的步表。
     """
-    phases.set_active(phases.hold_step(recipe), tag)   # 阶段划分：本批 recipe 的最长步
+    h0, h1 = phases.hold_span(recipe)          # 阶段划分：进气起步 → 最长步（区间）
+    phases.set_active(h1, tag, h0)
     S = v4.global_scale(proc)
     meas, segT, segV = {}, [], []
     for (s, p), sub in proc.groupby(["step", "pass"], sort=False):
@@ -332,8 +333,10 @@ def generate(recipe_path, log_path, name=None, note="", outdir=None,
         print(f"[1/4] recipe：{recipe_path}")
     recipe, rinfo = load_recipe_any(recipe_path, sheet=sheet, verbose=verbose)
 
-    hold = phases.hold_step(recipe)          # 涂层中 = recipe 时长最长的一步（本批现算）
+    hold = phases.hold_step(recipe)          # 涂层中末步 = recipe 时长最长的一步（主工艺段切分锚点）
+    g0 = phases.hold_start(recipe, hold)     # 涂层中起步 = 氢A1 开始进气的那一步
     if verbose:
+        print(f"  · 涂层中区间：步{g0}–{hold}")
         print(f"[2/4] log：{log_path}")
     proc, linfo = ingest_log(log_path, cache=cache, verbose=verbose, hold=hold)
 
@@ -349,7 +352,8 @@ def generate(recipe_path, log_path, name=None, note="", outdir=None,
     if verbose:
         print("[4/4] 生成 HTML…")
     out = mhr.build_report(st, proc, segT, segV, batch=tag, note=note, tag=tag,
-                           outdir=outdir, n_steps_recipe=rinfo["n_steps"], hold=hold)
+                           outdir=outdir, n_steps_recipe=rinfo["n_steps"], hold=hold,
+                           recipe=recipe)
     if open_file:
         try:
             os.startfile(out)        # noqa: S606  Windows 双击同效

@@ -817,8 +817,8 @@ def main():
     diags = {}             # tag -> 需求7 源系统偏差诊断
     for tag, label, rfile, d3, d4 in RUNS:
         recipe = v5.load_recipe(rfile)
-        hold = v5.phases.hold_step(recipe)       # 涂层中 = 本批 recipe 时长最长的一步
-        v5.phases.set_active(hold, tag)
+        h0, hold = v5.phases.hold_span(recipe)   # 涂层中 = [进气起步, 时长最长的一步]
+        v5.phases.set_active(hold, tag, h0)
         proc, dropped = v5.load_log(tag, hold=hold)
         meas = v5.load_measured(tag, d3, d4)
         st = v5.analyze_run(tag, label, recipe, proc, meas)
